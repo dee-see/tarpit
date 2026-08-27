@@ -1,0 +1,13 @@
+# Binaries
+/tarpit
+/dist/
+
+# Corpus databases and exports.
+#
+# These contain live, unreported dangling infrastructure belonging to third
+# parties. They must never be committed to a public repository.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.jsonl
