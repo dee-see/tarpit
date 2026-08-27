@@ -37,7 +37,10 @@ const (
 const urlChar = "[^\\s\"'<>`\\\\|^\\[\\]]"
 
 var (
-	urlRe = regexp.MustCompile(`(?i)\b(?:git\+)?(?:https?|ftps?|ssh|git|s3|gs)://` + urlChar + `+`)
+	// No leading \b: the literal scheme:// is specific enough on its own, and a
+	// word boundary would drop URLs concatenated onto preceding text, which is
+	// common in minified sources and in strings baked into binaries.
+	urlRe = regexp.MustCompile(`(?i)(?:git\+)?(?:https?|ftps?|ssh|git|s3|gs)://` + urlChar + `+`)
 
 	// Protocol-relative URLs (//cdn.example.com/x) are worth catching but look
 	// exactly like line comments, so this pattern is strict: a plausible dotted
