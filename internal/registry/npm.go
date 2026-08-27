@@ -125,7 +125,9 @@ func (c *Client) get(ctx context.Context, target, accept string) (*http.Response
 		}
 		req.Header.Set("User-Agent", c.UserAgent)
 		req.Header.Set("Accept", accept)
-		req.Header.Set("Accept-Encoding", "gzip")
+		// Accept-Encoding is left to the transport: setting it by hand would
+		// disable Go's transparent decompression, and a tarball served with
+		// Content-Encoding: gzip would then arrive double-compressed.
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {

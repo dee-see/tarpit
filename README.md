@@ -24,9 +24,88 @@ slow, network-heavy, and produces immutable results; takeover fingerprints are c
 constantly. Keeping them apart means improving a fingerprint re-queries a local database instead
 of re-crawling the registry.
 
+## Usage
+
+```
+tarpit crawl <package>...   crawl from seed packages and extract URLs
+tarpit status               summarize the corpus
+tarpit export               stream the corpus as JSONL
+```
+
+Crawl a package and its direct dependencies:
+
+```console
+$ tarpit crawl sqlite3 --depth 1 --sample major
+crawling [sqlite3] (edges: [runtime optional], sample: major, db: corpus.db)
+sqlite3: 5 version(s) scanned, 0 skipped, 5132 URL(s), depth 0
+```
+
+Then look at what it found, worst first:
+
+```sql
+SELECT o.source_kind, p.name || '@' || v.version, u.host, o.location
+FROM url_occurrences o
+JOIN urls u             ON u.id = o.url_id
+JOIN package_versions v ON v.id = o.version_id
+JOIN packages p         ON p.id = v.package_id
+WHERE o.source_kind IN ('metadata_script', 'file_install_script', 'metadata_binary');
+```
+
+```
+metadata_binary | sqlite3@2.2.7  | mapbox-node-binary.s3.amazonaws.com | binary.host
+metadata_binary | sqlite3@3.1.13 | mapbox-node-binary.s3.amazonaws.com | binary.host
+metadata_binary | sqlite3@4.2.0  | mapbox-node-binary.s3.amazonaws.com | binary.host
+```
+
+### Notable flags
+
+| Flag | Meaning |
+|---|---|
+| `--depth N` | Hops from the seed. `0` is the seeds alone, `-1` (default) is unlimited. |
+| `--sample minor\|major\|all` | Version density. Default `minor`: the highest patch of each release line. |
+| `--dev` | Also follow devDependencies. Incremental - see below. |
+| `--rate N` | Registry requests per second. Default 10. |
+| `--concurrency N` | Packages in flight. Default 8. |
+
+The crawl is a persistent queue in SQLite, so it runs until you stop it and resumes where it
+left off. Interrupt it with Ctrl-C and rerun the same command.
+
+## How it works
+
+Every URL is stored with a `source_kind` recording where it came from, because that is what
+separates a finding from noise. In the `sqlite3` crawl above, 3584 URLs came from README files
+and 3 came from `binary.host`; only the latter is fetched during `npm install`.
+
+| Kind | Origin | Runs at install? |
+|---|---|---|
+| `metadata_script` | `preinstall` / `install` / `postinstall` / `prepare` | yes |
+| `file_install_script` | a file those hooks invoke, e.g. `scripts/install.js` | yes |
+| `metadata_binary` | `binary.host` (node-pre-gyp, prebuild-install) | yes |
+| `metadata_dep_spec` | an `http(s)` or `git+` dependency spec | yes |
+| `file_build_config` | `binding.gyp`, `Makefile`, shell scripts, CI config | sometimes |
+| `metadata_repo` | `repository`, `homepage`, `bugs`, `funding` | no |
+| `file_source` / `file_docs` / `file_test` | everything else in the tarball | no |
+
+Two things make the crawl cheap to extend:
+
+**Tarballs never touch disk.** The response body is piped straight through gzip into tar and
+scanned in 1 MiB chunks with an overlap between them, so nothing is held whole in memory and
+nothing is skipped for being large.
+
+**Every dependency kind is recorded, even the ones being ignored.** `--dev` controls what gets
+*enqueued*, never what gets *stored*. So this:
+
+```console
+$ tarpit crawl react              # runtime + optional edges
+$ tarpit crawl react --dev        # now also devDependencies
+```
+
+...costs no re-crawling. The second command finds newly-reachable packages with a query over
+edges the first one already wrote, and skips every version already on disk.
+
 ## Status
 
-Under construction. Phase 1 (extraction) is in progress; the `check` command does not exist yet.
+Phase 1 (extraction) works. The `check` command does not exist yet.
 
 ## Scope and conduct
 
