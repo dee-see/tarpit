@@ -28,6 +28,9 @@ const (
 	FileSource        SourceKind = "file_source"
 	FileDocs          SourceKind = "file_docs"
 	FileTest          SourceKind = "file_test"
+	// MetadataOther covers URLs found by sweeping the raw version manifest
+	// that no typed field claimed - custom fields, publisher tooling residue.
+	MetadataOther SourceKind = "metadata_other"
 )
 
 // urlChar is the set of bytes allowed to continue a URL. Braces and '$' are
