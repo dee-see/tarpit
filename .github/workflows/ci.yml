@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # go fix rewrites uses of APIs that were superseded long ago. It is close
+      # to a no-op on new code, but it costs nothing and will speak up if a
+      # future toolchain deprecates something we depend on.
+      - name: go fix
+        run: |
+          go fix ./...
+          git diff --exit-code || {
+            echo "::error::go fix rewrote code; commit the result"
+            exit 1
+          }
+
+      - name: go mod tidy is clean
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum || {
+            echo "::error::go.mod/go.sum are not tidy; run 'go mod tidy'"
+            exit 1
+          }
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test -race ./...
+
+      # The corpus driver is modernc.org/sqlite precisely so that tarpit needs
+      # no cgo. Cross-compiling proves that claim on every commit, without
+      # paying for extra runners.
+      - name: cross-compile
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            echo "building $target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...
+          done
