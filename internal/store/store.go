@@ -66,6 +66,13 @@ func (s *Store) write(ctx context.Context, fn func(*sql.Tx) error) error {
 
 func now() string { return time.Now().UTC().Format(time.RFC3339) }
 
+// text makes a value safe for a SQLite TEXT column. URLs and snippets are
+// lifted verbatim out of tarballs, and binaries are scanned rather than
+// skipped, so these bytes are not guaranteed to be valid UTF-8. Storing raw
+// bytes in a TEXT column produces a database that standard clients cannot read
+// - a Python sqlite3 cursor raises rather than returning the row.
+func text(s string) string { return strings.ToValidUTF8(s, "\uFFFD") }
+
 // ---------------------------------------------------------------- packages
 
 // UpsertPackage returns the id of a package row, creating it if needed.
@@ -205,7 +212,7 @@ func (s *Store) SaveVersion(ctx context.Context, packageID int64, r VersionResul
 				`INSERT OR IGNORE INTO url_occurrences
 					(url_id, version_id, source_kind, location, line, snippet)
 				 VALUES (?, ?, ?, ?, ?, ?)`,
-				urlID, versionID, f.SourceKind, f.Location, f.Line, f.Snippet)
+				urlID, versionID, f.SourceKind, text(f.Location), f.Line, text(f.Snippet))
 			if err != nil {
 				return err
 			}
@@ -216,7 +223,7 @@ func (s *Store) SaveVersion(ctx context.Context, packageID int64, r VersionResul
 					INSERT INTO hosts (host, registrable_domain, first_seen_at, occurrence_count)
 					VALUES (?, ?, ?, 1)
 					ON CONFLICT(host) DO UPDATE SET occurrence_count = occurrence_count + 1`,
-					f.Host, f.RegistrableDomain, now()); err != nil {
+					text(f.Host), text(f.RegistrableDomain), now()); err != nil {
 					return err
 				}
 			}
@@ -230,11 +237,12 @@ func upsertURL(ctx context.Context, tx *sql.Tx, f Finding) (int64, error) {
 		INSERT OR IGNORE INTO urls
 			(url, scheme, host, port, path, registrable_domain, has_placeholder, first_seen_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		f.URL, f.Scheme, f.Host, f.Port, f.Path, f.RegistrableDomain, f.HasPlaceholder, now()); err != nil {
+		text(f.URL), f.Scheme, text(f.Host), f.Port, text(f.Path),
+		text(f.RegistrableDomain), f.HasPlaceholder, now()); err != nil {
 		return 0, err
 	}
 	var id int64
-	err := tx.QueryRowContext(ctx, `SELECT id FROM urls WHERE url = ?`, f.URL).Scan(&id)
+	err := tx.QueryRowContext(ctx, `SELECT id FROM urls WHERE url = ?`, text(f.URL)).Scan(&id)
 	return id, err
 }
 

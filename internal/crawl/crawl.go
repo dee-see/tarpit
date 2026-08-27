@@ -244,7 +244,9 @@ func scanVersion(ctx context.Context, cfg Config, packument *registry.Packument,
 	for _, d := range manifest.Deps {
 		result.Deps = append(result.Deps, store.Dep{Name: d.Name, Range: d.Range, Kind: string(d.Kind)})
 	}
+	fromManifest := map[string]bool{}
 	for _, f := range manifest.URLs {
+		fromManifest[f.URL.Normalized] = true
 		result.Findings = append(result.Findings, toFinding(f.URL, f.Kind, f.Location, 0, f.Snippet))
 	}
 
@@ -261,6 +263,15 @@ func scanVersion(ctx context.Context, cfg Config, packument *registry.Packument,
 		return result, manifest.Deps
 	}
 	for _, f := range findings {
+		// The archive's root package.json is the same document the registry
+		// serves as the manifest, so most of its URLs are already recorded with
+		// better provenance. Only exact duplicates are dropped: npm rewrites
+		// repository.url on publish ("https://..." becomes "git+https://..."),
+		// and a nested package.json is a different document entirely - a
+		// vendored dependency or build output - so both must survive.
+		if f.Path == "package.json" && fromManifest[f.URL.Normalized] {
+			continue
+		}
 		result.Findings = append(result.Findings, toFinding(f.URL, f.Kind, f.Path, f.Line, f.Snippet))
 	}
 	return result, manifest.Deps

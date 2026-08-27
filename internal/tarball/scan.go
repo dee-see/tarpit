@@ -72,6 +72,14 @@ func Scan(r io.Reader, opts Options) ([]Finding, error) {
 	tr := tar.NewReader(counted)
 
 	var findings []Finding
+	// npm wraps every tarball in a single root directory. It is called
+	// "package" today, but packages published around 2010 used the package name
+	// or a timestamped scratch directory, so the root is discovered from the
+	// archive rather than assumed. Paths are recorded raw and the confirmed root
+	// is stripped at the end; if the entries turn out not to share one, nothing
+	// is stripped and the paths stay accurate.
+	root, firstEntry := "", true
+
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -83,12 +91,27 @@ func Scan(r io.Reader, opts Options) ([]Finding, error) {
 			}
 			return findings, fmt.Errorf("tar: %w", err)
 		}
+		name := normalizePath(hdr.Name)
+		if firstEntry {
+			firstEntry = false
+			// Real tarballs lead with a directory entry for the root itself,
+			// whose cleaned name carries no slash at all - so the root has to be
+			// taken whole rather than as a leading segment.
+			if hdr.Typeflag == tar.TypeDir && !strings.Contains(name, "/") {
+				root = name
+			} else {
+				root = firstSegment(name)
+			}
+		} else if root != "" && name != root && !strings.HasPrefix(name, root+"/") {
+			root = ""
+		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
 
-		name := stripPackagePrefix(hdr.Name)
-		kind := classify(name, opts.InstallScripts)
+		// Classify against the path as the package sees it, so that an install
+		// hook naming "scripts/install.js" matches.
+		kind := classify(strings.TrimPrefix(name, root+"/"), opts.InstallScripts)
 
 		found, err := scanFile(tr, name, kind)
 		findings = append(findings, found...)
@@ -97,6 +120,12 @@ func Scan(r io.Reader, opts Options) ([]Finding, error) {
 				return findings, ErrTooLarge
 			}
 			return findings, fmt.Errorf("read %s: %w", name, err)
+		}
+	}
+
+	if root != "" {
+		for i := range findings {
+			findings[i].Path = strings.TrimPrefix(findings[i].Path, root+"/")
 		}
 	}
 	return findings, nil
@@ -223,14 +252,17 @@ func classify(name string, installScripts map[string]bool) extract.SourceKind {
 	return extract.FileSource
 }
 
-// stripPackagePrefix removes the "package/" directory that npm wraps every
-// tarball in, so recorded paths match what a reader sees in the repository.
-func stripPackagePrefix(name string) string {
-	name = strings.TrimPrefix(path.Clean("/"+name), "/")
-	if rest, ok := strings.CutPrefix(name, "package/"); ok {
-		return rest
+// normalizePath cleans an archive entry name into a plain relative path.
+func normalizePath(name string) string {
+	return strings.TrimPrefix(path.Clean("/"+name), "/")
+}
+
+// firstSegment returns the leading directory of a path, or "" if it has none.
+func firstSegment(name string) string {
+	if i := strings.Index(name, "/"); i > 0 {
+		return name[:i]
 	}
-	return name
+	return ""
 }
 
 // countingReader enforces the decompression ceiling as bytes are pulled.

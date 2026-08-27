@@ -35,6 +35,13 @@ type fakeRegistry struct {
 }
 
 func newFakeRegistry(t *testing.T, pkgs map[string]fakePkg) *fakeRegistry {
+	return newFakeRegistryWith(t, pkgs, nil)
+}
+
+// newFakeRegistryWith allows extra manifest fields, so a test can make the
+// registry's copy of a manifest differ from the one inside the tarball - which
+// is what npm's publish-time normalization actually does.
+func newFakeRegistryWith(t *testing.T, pkgs map[string]fakePkg, extra map[string]any) *fakeRegistry {
 	t.Helper()
 	fr := &fakeRegistry{hits: map[string]int{}}
 
@@ -75,6 +82,11 @@ func newFakeRegistry(t *testing.T, pkgs map[string]fakePkg) *fakeRegistry {
 		}
 		if p.scripts != nil {
 			manifest["scripts"] = p.scripts
+		}
+		if name == "root" {
+			for k, v := range extra {
+				manifest[k] = v
+			}
 		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"name":      name,
@@ -304,5 +316,49 @@ func TestReprocessedPackageSkipsScannedVersions(t *testing.T) {
 	}
 	if got := fr.hitsFor("/tarballs/root.tgz"); got != tarballHits {
 		t.Errorf("root tarball refetched (%d -> %d) despite being already scanned", tarballHits, got)
+	}
+}
+
+// TestRootPackageJSONDropsOnlyExactDuplicates guards the narrow claim the
+// dedupe rests on. The archive's root package.json largely repeats the
+// manifest, but npm rewrites repository.url on publish, so the two are not
+// interchangeable and only identical URLs may be dropped.
+func TestRootPackageJSONDropsOnlyExactDuplicates(t *testing.T) {
+	pkgs := map[string]fakePkg{
+		"root": {
+			files: map[string]string{
+				// First URL matches the manifest homepage exactly; second is the
+				// un-normalized repository URL that only exists in the tarball.
+				"package.json": `{"homepage":"https://dup.example.com",` +
+					`"repository":{"url":"https://github.com/x/y.git"}}`,
+				"nested/package.json": `{"homepage":"https://vendored.example.com"}`,
+			},
+		},
+	}
+	// The manifest carries the normalized form, as npm would publish it.
+	fr := newFakeRegistryWith(t, pkgs, map[string]any{
+		"homepage":   "https://dup.example.com",
+		"repository": map[string]string{"url": "git+https://github.com/x/y.git"},
+	})
+	dbPath := path.Join(t.TempDir(), "corpus.db")
+	runCrawl(t, fr, dbPath, []string{"runtime"})
+
+	kindsFor := func(host string) []string {
+		return query[string](t, dbPath, `
+			SELECT o.source_kind || '@' || o.location
+			FROM url_occurrences o JOIN urls u ON u.id = o.url_id
+			WHERE u.host = ? ORDER BY 1`, host)
+	}
+
+	if got := kindsFor("dup.example.com"); fmt.Sprint(got) != "[metadata_repo@homepage]" {
+		t.Errorf("duplicate = %v, want only the manifest sighting", got)
+	}
+	if got := kindsFor("vendored.example.com"); fmt.Sprint(got) != "[file_source@nested/package.json]" {
+		t.Errorf("nested package.json = %v, want kept: it is a different document", got)
+	}
+	got := kindsFor("github.com")
+	if len(got) != 2 {
+		t.Errorf("github.com sightings = %v, want both the manifest's git+https form "+
+			"and the tarball's plain https form", got)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,7 +17,28 @@ func makeArchive(t *testing.T, files map[string]string) []byte {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(zw)
-	for name, body := range files {
+
+	// npm pack emits a directory entry for every directory, the root included.
+	// The fixture does the same: without those entries these tests do not
+	// exercise the path real archives take.
+	dirs := map[string]bool{}
+	for name := range files {
+		for i, c := range name {
+			if c == '/' {
+				dirs[name[:i]] = true
+			}
+		}
+	}
+	for _, dir := range slices.Sorted(maps.Keys(dirs)) {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: dir, Mode: 0o755, Typeflag: tar.TypeDir,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		body := files[name]
 		if err := tw.WriteHeader(&tar.Header{
 			Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg,
 		}); err != nil {
@@ -137,5 +160,45 @@ func TestScanEnforcesDecompressionCeiling(t *testing.T) {
 	_, err := Scan(bytes.NewReader(archive), Options{MaxDecompressed: 4096})
 	if err == nil {
 		t.Fatal("expected ErrTooLarge, got nil")
+	}
+}
+
+// Packages published around 2010 do not use a "package/" root. The root is
+// discovered rather than assumed, so their paths come out just as clean.
+func TestScanStripsNonStandardArchiveRoot(t *testing.T) {
+	for _, root := range []string{"package", "coffee-script", "1289345679745-0.6631237138062716"} {
+		archive := makeArchive(t, map[string]string{
+			root + "/lib/index.js": "fetch('https://root.example.com/a')\n",
+		})
+		findings, err := Scan(bytes.NewReader(archive), Options{})
+		if err != nil {
+			t.Fatalf("root %q: %v", root, err)
+		}
+		if len(findings) != 1 {
+			t.Fatalf("root %q: got %d findings, want 1", root, len(findings))
+		}
+		if findings[0].Path != "lib/index.js" {
+			t.Errorf("root %q: path = %q, want lib/index.js", root, findings[0].Path)
+		}
+	}
+}
+
+// If the entries do not actually share a root, nothing is stripped: an accurate
+// path beats a tidy one.
+func TestScanLeavesUnwrappedArchivePathsAlone(t *testing.T) {
+	archive := makeArchive(t, map[string]string{
+		"lib/index.js": "fetch('https://one.example.com/a')\n",
+		"bin/tool.js":  "fetch('https://two.example.com/b')\n",
+	})
+	findings, err := Scan(bytes.NewReader(archive), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := map[string]bool{}
+	for _, f := range findings {
+		paths[f.Path] = true
+	}
+	if !paths["lib/index.js"] || !paths["bin/tool.js"] {
+		t.Errorf("paths = %v, want both left intact", paths)
 	}
 }
