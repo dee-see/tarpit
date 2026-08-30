@@ -218,7 +218,7 @@ func (s *Store) SaveVersion(ctx context.Context, packageID int64, r VersionResul
 			}
 			// Only count a host sighting when the occurrence was actually new,
 			// so re-running a version does not inflate the tally.
-			if n, _ := res.RowsAffected(); n > 0 && f.Host != "" {
+			if n, _ := res.RowsAffected(); n > 0 && checkableHost(f.Host, f.Scheme) {
 				if _, err := tx.ExecContext(ctx, `
 					INSERT INTO hosts (host, registrable_domain, first_seen_at, occurrence_count)
 					VALUES (?, ?, ?, 1)
@@ -230,6 +230,31 @@ func (s *Store) SaveVersion(ctx context.Context, packageID int64, r VersionResul
 		}
 		return nil
 	})
+}
+
+// bucketSchemes name object stores whose authority is a bucket rather than a
+// DNS name.
+var bucketSchemes = map[string]bool{"s3": true, "gs": true}
+
+// checkableHost reports whether a host belongs in the hosts table, which exists
+// to give the takeover checker a worklist.
+//
+// A host with no dot cannot be a domain. In practice it is the residue of a
+// truncated URL: concatenated JavaScript like "https://www." + domain is
+// everywhere in saved HTML and minified bundles, and trimming the trailing dot
+// leaves "www". Bucket schemes are exempt, because bucket names legitimately
+// have no dots and are among the most valuable targets there are.
+//
+// The URL itself is still recorded either way; this only decides whether a host
+// is worth trying to resolve later.
+func checkableHost(host, scheme string) bool {
+	if host == "" {
+		return false
+	}
+	if bucketSchemes[scheme] {
+		return true
+	}
+	return strings.Contains(host, ".")
 }
 
 func upsertURL(ctx context.Context, tx *sql.Tx, f Finding) (int64, error) {
