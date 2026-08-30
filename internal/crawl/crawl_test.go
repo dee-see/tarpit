@@ -127,6 +127,11 @@ func makeTarball(t *testing.T, files map[string]string) []byte {
 
 func runCrawl(t *testing.T, fr *fakeRegistry, dbPath string, kinds []string) Result {
 	t.Helper()
+	return runCrawlDepth(t, fr, dbPath, kinds, "root", -1)
+}
+
+func runCrawlDepth(t *testing.T, fr *fakeRegistry, dbPath string, kinds []string, seed string, depth int) Result {
+	t.Helper()
 	db, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -142,11 +147,11 @@ func runCrawl(t *testing.T, fr *fakeRegistry, dbPath string, kinds []string) Res
 		Store:       db,
 		Sample:      sample.Options{Strategy: sample.Minor},
 		FollowKinds: kinds,
-		MaxDepth:    -1,
+		MaxDepth:    depth,
 		Concurrency: 2,
 		MaxAttempts: 2,
 		Logf:        func(string, ...any) {},
-	}, []string{"root"})
+	}, []string{seed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,13 +243,23 @@ func TestRerunWithDevIsIncremental(t *testing.T) {
 	if second.Versions != 1 {
 		t.Errorf("second run scanned %d versions, want exactly 1 (devdep only)", second.Versions)
 	}
-	// A finished package is not even reclaimed off the frontier, so the second
-	// run should touch neither its metadata nor its artifact.
-	if got := fr.hitsFor("/tarballs/root.tgz"); got != rootTarballHits {
-		t.Errorf("root tarball refetched (%d -> %d)", rootTarballHits, got)
+	// Naming root as a seed resets its frontier row, so it is reprocessed - by
+	// design, since that is what re-expands its dependencies at depth 1 relative
+	// to this crawl. The cost is bounded to a single packument request:
+	if got := fr.hitsFor("/root"); got != rootPackumentHits+1 {
+		t.Errorf("root packument fetched %d times, want exactly one more (%d)",
+			got, rootPackumentHits+1)
 	}
-	if got := fr.hitsFor("/root"); got != rootPackumentHits {
-		t.Errorf("root packument refetched (%d -> %d)", rootPackumentHits, got)
+	// ...and crucially the artifact is not refetched, because version-level
+	// scan state lives in package_versions and the frontier reset does not
+	// touch it.
+	if got := fr.hitsFor("/tarballs/root.tgz"); got != rootTarballHits {
+		t.Errorf("root tarball refetched (%d -> %d); resetting the frontier row "+
+			"must not invalidate scanned versions", rootTarballHits, got)
+	}
+	if second.Skipped != 1 {
+		t.Errorf("skipped %d versions, want 1: root is reprocessed but already scanned",
+			second.Skipped)
 	}
 
 	doneAfter := query[int](t, dbPath, `SELECT count(*) FROM package_versions WHERE extract_status = 'done'`)[0]
@@ -360,5 +375,39 @@ func TestRootPackageJSONDropsOnlyExactDuplicates(t *testing.T) {
 	if len(got) != 2 {
 		t.Errorf("github.com sightings = %v, want both the manifest's git+https form "+
 			"and the tarball's plain https form", got)
+	}
+}
+
+// TestSeedingResetsDepth covers the bug this reset exists for: a package first
+// reached as a dependency keeps the depth it was discovered at, so seeding it
+// under a depth limit claimed nothing and reported no work.
+func TestSeedingResetsDepth(t *testing.T) {
+	pkgs := map[string]fakePkg{
+		"root": {deps: map[string]string{"mid": "^1"}},
+		"mid":  {deps: map[string]string{"leaf": "^1"}},
+		"leaf": {files: map[string]string{"index.js": "fetch('https://leaf.example.com/x')\n"}},
+	}
+	fr := newFakeRegistry(t, pkgs)
+	dbPath := path.Join(t.TempDir(), "corpus.db")
+
+	// Crawl root one hop: mid is scanned at depth 1, leaf is never enqueued.
+	runCrawlDepth(t, fr, dbPath, []string{"runtime"}, "root", 1)
+	if got := query[string](t, dbPath, `SELECT name FROM packages ORDER BY name`); fmt.Sprint(got) != "[mid root]" {
+		t.Fatalf("after first crawl packages = %v, want [mid root]", got)
+	}
+
+	// Now seed mid itself, one hop. Before the reset this claimed nothing,
+	// because mid sat at depth 1 and the limit was 1.
+	runCrawlDepth(t, fr, dbPath, []string{"runtime"}, "mid", 1)
+
+	names := query[string](t, dbPath, `SELECT name FROM packages ORDER BY name`)
+	if fmt.Sprint(names) != "[leaf mid root]" {
+		t.Errorf("packages = %v, want leaf reached by seeding mid", names)
+	}
+	if got := query[string](t, dbPath, `SELECT host FROM urls WHERE host='leaf.example.com'`); len(got) != 1 {
+		t.Error("URL behind the newly seeded package was not extracted")
+	}
+	if got := query[int](t, dbPath, `SELECT depth FROM frontier WHERE name='mid'`)[0]; got != 0 {
+		t.Errorf("mid depth = %d, want 0 after being seeded", got)
 	}
 }

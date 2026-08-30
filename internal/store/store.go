@@ -277,6 +277,46 @@ func (s *Store) Enqueue(ctx context.Context, ecosystem string, names []string, d
 	return added, err
 }
 
+// Seed places explicitly requested packages at the root of the crawl.
+//
+// Unlike Enqueue this resets an existing row: depth returns to 0 and a finished
+// or parked package becomes pending again. Without that, seeding a package that
+// an earlier crawl already reached as a dependency is a silent no-op - its
+// depth stays measured from that older root, so "crawl b --depth 1" claims
+// nothing and reports no work rather than crawling b's direct dependencies.
+//
+// No version is rescanned as a result. Version-level scan state lives in
+// package_versions.extract_status, which this does not touch, so reprocessing a
+// finished package costs one packument request and no tarballs.
+func (s *Store) Seed(ctx context.Context, ecosystem string, names []string) error {
+	return s.write(ctx, func(tx *sql.Tx) error {
+		for _, name := range names {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO frontier (ecosystem, name, depth, status, enqueued_from)
+				VALUES (?, ?, 0, 'pending', 'seed')
+				ON CONFLICT(ecosystem, name) DO UPDATE SET
+					depth = 0, status = 'pending', claimed_at = NULL, attempts = 0`,
+				ecosystem, name); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// PendingBeyondDepth counts queued packages the current depth limit excludes,
+// so a crawl that stops early can say so instead of reporting an empty queue.
+func (s *Store) PendingBeyondDepth(ctx context.Context, ecosystem string, maxDepth int) (int, error) {
+	if maxDepth < 0 {
+		return 0, nil
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM frontier WHERE ecosystem = ? AND status = 'pending' AND depth > ?`,
+		ecosystem, maxDepth).Scan(&n)
+	return n, err
+}
+
 // Claim takes the shallowest pending package off the frontier. It returns nil
 // when the queue is drained. A negative maxDepth means unlimited.
 func (s *Store) Claim(ctx context.Context, ecosystem string, maxDepth int) (*FrontierItem, error) {

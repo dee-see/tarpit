@@ -56,7 +56,7 @@ func Run(ctx context.Context, cfg Config, seeds []string) (Result, error) {
 		cfg.Logf("recovered %d package(s) left in flight by a previous run", n)
 	}
 
-	if _, err := cfg.Store.Enqueue(ctx, cfg.Ecosystem, seeds, 0, "seed"); err != nil {
+	if err := cfg.Store.Seed(ctx, cfg.Ecosystem, seeds); err != nil {
 		return result, err
 	}
 
@@ -133,6 +133,13 @@ func Run(ctx context.Context, cfg Config, seeds []string) (Result, error) {
 	// Whether we drained the queue or were interrupted, nothing stays claimed.
 	if n, err := cfg.Store.ReleaseClaimed(context.WithoutCancel(ctx)); err == nil && n > 0 {
 		cfg.Logf("returned %d in-flight package(s) to the queue", n)
+	}
+
+	// A depth limit can leave the queue non-empty while nothing is claimable.
+	// Saying so beats reporting "0 packages" and letting it read as "all done".
+	if n, err := cfg.Store.PendingBeyondDepth(
+		context.WithoutCancel(ctx), cfg.Ecosystem, cfg.MaxDepth); err == nil && n > 0 {
+		cfg.Logf("%d package(s) remain queued beyond --depth %d; raise it to continue", n, cfg.MaxDepth)
 	}
 
 	result = Result{
