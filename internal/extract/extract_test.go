@@ -33,9 +33,34 @@ func TestNormalize(t *testing.T) {
 		{name: "templated path keeps literal host", in: "https://bin.example.com/${VERSION}/x.tgz", wantOK: true,
 			wantNorm: "https://bin.example.com/${VERSION}/x.tgz", wantHost: "bin.example.com",
 			wantETLD: "example.com", wantHolder: true},
+		// Case is preserved here: ${HOST} is a variable name, and folding it would
+		// corrupt the only record of what the fetch actually interpolates.
 		{name: "templated host yields no host", in: "https://${HOST}/x.tgz", wantOK: true,
-			wantNorm: "https://${host}/x.tgz", wantHost: "", wantHolder: true},
+			wantNorm: "https://${HOST}/x.tgz", wantHost: "", wantHolder: true},
 		{name: "not a url", in: "https://", wantOK: false},
+
+		// Both cases below were producing "${publishablekey" as a literal host,
+		// which the takeover checker would then have tried to resolve.
+		{name: "template expression containing spaces",
+			in:     "https://${publishableKey == null ? void 0 : publishableKey.frontendApi}/.well-known/x",
+			wantOK: true,
+			// The host is unknown, not "${publishableKey" - so it stays empty and
+			// the checker skips it, while the templated fetch is still recorded.
+			wantNorm:   "https://${publishableKey == null ? void 0 : publishableKey.frontendApi}/.well-known/x",
+			wantHost:   "",
+			wantHolder: true},
+		{name: "question mark inside a template expression",
+			in:         "https://${publishableKey?.frontendApi}/.well-known/x",
+			wantOK:     true,
+			wantNorm:   "https://${publishableKey?.frontendApi}/.well-known/x",
+			wantHost:   "",
+			wantHolder: true},
+		{name: "templated subdomain keeps nothing guessable",
+			in:         "https://${env}.example.com/a",
+			wantOK:     true,
+			wantNorm:   "https://${env}.example.com/a",
+			wantHost:   "",
+			wantHolder: true},
 	}
 
 	for _, tc := range tests {
@@ -93,6 +118,11 @@ func TestFind(t *testing.T) {
 			name: "line comment is not a url",
 			in:   "// TODO: fix.this later",
 			want: nil,
+		},
+		{
+			name: "template literal with spaces is matched whole",
+			in:   "`Bearer resource_metadata=\"https://${key == null ? void 0 : key.frontendApi}/.well-known/x\"`",
+			want: []string{"https://${key == null ? void 0 : key.frontendApi}/.well-known/x"},
 		},
 		{
 			name: "git dependency spec",

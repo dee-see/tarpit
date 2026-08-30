@@ -43,7 +43,13 @@ var (
 	// No leading \b: the literal scheme:// is specific enough on its own, and a
 	// word boundary would drop URLs concatenated onto preceding text, which is
 	// common in minified sources and in strings baked into binaries.
-	urlRe = regexp.MustCompile(`(?i)(?:git\+)?(?:https?|ftps?|ssh|git|s3|gs)://` + urlChar + `+`)
+	//
+	// A {...} span is matched as a unit so that a template expression may
+	// contain spaces. Real code does: `https://${publishableKey == null ? void 0
+	// : publishableKey.frontendApi}/...` would otherwise truncate at the first
+	// space, losing the closing brace and with it any chance of recognising the
+	// result as templated rather than as a literal host.
+	urlRe = regexp.MustCompile(`(?i)(?:git\+)?(?:https?|ftps?|ssh|git|s3|gs)://(?:\{[^}]*\}|` + urlChar + `)+`)
 
 	// Protocol-relative URLs (//cdn.example.com/x) are worth catching but look
 	// exactly like line comments, so this pattern is strict: a plausible dotted
@@ -124,9 +130,8 @@ func Normalize(raw string) (URL, bool) {
 		scheme, rest = strings.ToLower(raw[:i]), raw[i+3:]
 	}
 
-	authEnd := strings.IndexAny(rest, "/?#")
 	authority := rest
-	if authEnd >= 0 {
+	if authEnd := authorityEnd(rest); authEnd >= 0 {
 		authority, u.Path = rest[:authEnd], rest[authEnd:]
 	}
 
@@ -176,7 +181,14 @@ func Normalize(raw string) (URL, bool) {
 		b.WriteString(userinfo)
 		b.WriteByte('@')
 	}
-	b.WriteString(strings.ToLower(host))
+	// Case-fold the host only when it really is one. Lowercasing a template
+	// expression corrupts it: ${publishableKey} is a JavaScript identifier, not
+	// a hostname, and u.Host is left empty precisely in that case.
+	if u.Host != "" {
+		b.WriteString(u.Host)
+	} else {
+		b.WriteString(host)
+	}
 	if u.Port != "" {
 		b.WriteByte(':')
 		b.WriteString(u.Port)
@@ -185,6 +197,28 @@ func Normalize(raw string) (URL, bool) {
 	u.Normalized = b.String()
 
 	return u, true
+}
+
+// authorityEnd returns the offset of the first "/", "?" or "#" that ends the
+// authority, ignoring any that falls inside a {...} span.
+//
+// Template expressions routinely contain those characters:
+// https://${publishableKey?.frontendApi}/.well-known/x would otherwise be cut
+// at the "?" inside the braces, yielding "${publishableKey" as the authority
+// and defeating the placeholder check that exists to blank the host.
+func authorityEnd(rest string) int {
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case '{':
+			if j := strings.IndexByte(rest[i:], '}'); j >= 0 {
+				i += j
+				continue
+			}
+		case '/', '?', '#':
+			return i
+		}
+	}
+	return -1
 }
 
 // splitHostPort separates a trailing :port only when it is genuinely numeric,
