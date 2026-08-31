@@ -126,3 +126,31 @@ func TestLatestOutsideTheSampleIsFetchedSeparately(t *testing.T) {
 		t.Errorf("fetched manifest is for %v, want 1.0.0", m["version"])
 	}
 }
+
+// Four packages in the react crawl were lost entirely because their "time"
+// object held a value that was not a timestamp string. One bad entry must not
+// cost the whole package.
+func TestPackumentToleratesMalformedTimeEntries(t *testing.T) {
+	body := `{"name":"thing",
+	  "time":{"created":"2011-01-01T00:00:00.000Z",
+	          "1.0.0":"2016-03-22T12:00:00.000Z",
+	          "1.1.0":{"ts":1234,"_id":"junk"}},
+	  "versions":{"1.0.0":{"version":"1.0.0"},"1.1.0":{"version":"1.1.0"}},
+	  "dist-tags":{"latest":"1.1.0"}}`
+	c := serve(t, body)
+
+	p, err := c.Packument(context.Background(), "thing",
+		sample.NewRetainer(sample.Options{Strategy: sample.All}))
+	if err != nil {
+		t.Fatalf("one malformed time entry lost the whole packument: %v", err)
+	}
+	if len(p.Retained()) != 2 {
+		t.Errorf("retained %v, want both versions", p.Retained())
+	}
+	if _, ok := p.PublishedAt("1.0.0"); !ok {
+		t.Error("the well-formed timestamp was dropped too")
+	}
+	if _, ok := p.PublishedAt("1.1.0"); ok {
+		t.Error("the malformed entry should be skipped, not invented")
+	}
+}

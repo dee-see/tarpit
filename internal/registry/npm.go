@@ -132,7 +132,7 @@ func (c *Client) Packument(ctx context.Context, name string, retain ManifestReta
 		case "dist-tags":
 			err = dec.Decode(&p.DistTags)
 		case "time":
-			err = dec.Decode(&p.Time)
+			p.Time, err = decodeTimes(dec)
 		case "versions":
 			err = streamVersions(dec, p, retain)
 		default:
@@ -199,6 +199,29 @@ func (c *Client) VersionManifest(ctx context.Context, name, version string) (jso
 		return nil, fmt.Errorf("decode %s@%s: %w", name, version, err)
 	}
 	return raw, nil
+}
+
+// decodeTimes reads the "time" object, keeping only entries whose value is a
+// string.
+//
+// Manifests already get this tolerance because packages published in 2011
+// routinely violate the schema; the packument itself needed it too. A handful
+// of old packages carry an object where a timestamp belongs, and decoding
+// strictly threw away the whole document - and with it every version of the
+// package - over one malformed entry.
+func decodeTimes(dec *json.Decoder) (map[string]string, error) {
+	var raw map[string]json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			out[k] = s
+		}
+	}
+	return out, nil
 }
 
 func expectDelim(dec *json.Decoder, want json.Delim) error {
