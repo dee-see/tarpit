@@ -115,3 +115,23 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// Sort orders versions oldest to newest. Anything that is not valid semver
+// sorts last, lexically among itself, so the order is always deterministic.
+func Sort(versions []string) {
+	sort.Slice(versions, func(i, j int) bool {
+		a, b := canonical(versions[i]), canonical(versions[j])
+		switch {
+		case a == "" && b == "":
+			return versions[i] < versions[j]
+		case a == "":
+			return false
+		case b == "":
+			return true
+		}
+		if c := semver.Compare(a, b); c != 0 {
+			return c < 0
+		}
+		return versions[i] < versions[j]
+	})
+}

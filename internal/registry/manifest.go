@@ -33,7 +33,6 @@ type MetaFinding struct {
 	Kind     extract.SourceKind
 	Location string // dotted manifest path, e.g. "scripts.postinstall"
 	URL      extract.URL
-	Snippet  string
 }
 
 // Manifest is the useful content of one published version's package.json.
@@ -94,9 +93,7 @@ func ParseManifest(raw json.RawMessage) (*Manifest, error) {
 				continue
 			}
 			seen[u.Normalized] = true
-			m.URLs = append(m.URLs, MetaFinding{
-				Kind: kind, Location: location, URL: u, Snippet: truncate(candidate),
-			})
+			m.URLs = append(m.URLs, MetaFinding{Kind: kind, Location: location, URL: u})
 		}
 	}
 
@@ -222,12 +219,4 @@ func collectStrings(raw json.RawMessage) []string {
 	}
 	walk(v)
 	return out
-}
-
-func truncate(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) > 200 {
-		return s[:200]
-	}
-	return s
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -154,7 +155,9 @@ type packageStats struct{ versions, urls, skipped int }
 func processPackage(ctx context.Context, cfg Config, item store.FrontierItem) (packageStats, error) {
 	var stats packageStats
 
-	packument, err := cfg.Client.Packument(ctx, item.Name)
+	// The retainer decides what to keep while the document is still streaming,
+	// so manifests for versions that will not be sampled are never built.
+	packument, err := cfg.Client.Packument(ctx, item.Name, sample.NewRetainer(cfg.Sample))
 	if err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
 			// Unpublished packages are ordinary in old dependency trees. Record
@@ -174,14 +177,49 @@ func processPackage(ctx context.Context, cfg Config, item store.FrontierItem) (p
 		return stats, err
 	}
 
-	opts := cfg.Sample
-	opts.Latest = packument.Latest()
-	versions := sample.Pick(packument.VersionList(), opts)
+	versions := packument.Retained()
+
+	// The latest dist-tag is always worth scanning, but dist-tags can appear
+	// after versions in the document, so the retainer had no way to know. On
+	// the rare occasions sampling did not already keep it, fetch that one
+	// manifest on its own.
+	if latest := packument.Latest(); latest != "" {
+		if _, held := packument.Versions[latest]; !held {
+			raw, ferr := cfg.Client.VersionManifest(ctx, item.Name, latest)
+			if ferr != nil {
+				cfg.Logf("%s: could not fetch latest (%s): %v", item.Name, latest, ferr)
+			} else {
+				packument.Versions[latest] = raw
+				versions = append(versions, latest)
+			}
+		}
+	}
+	sample.Sort(versions)
 
 	done, err := cfg.Store.ScannedVersions(ctx, packageID)
 	if err != nil {
 		return stats, err
 	}
+
+	// Copy out only the manifests actually about to be scanned, then drop the
+	// packument. A registry document holds every published version's manifest,
+	// which for a package like @types/node is hundreds of megabytes; holding it
+	// for the whole version loop, times the worker count, is enough to get the
+	// process OOM-killed. Sampling usually keeps a small fraction of versions,
+	// so this bounds resident memory by what is genuinely in use.
+	todo := make([]pendingVersion, 0, len(versions))
+	for _, version := range versions {
+		if done[version] {
+			stats.skipped++
+			continue
+		}
+		pv := pendingVersion{version: version, manifest: packument.Versions[version]}
+		if t, ok := packument.PublishedAt(version); ok {
+			pv.published = &t
+		}
+		todo = append(todo, pv)
+	}
+	packument = nil
 
 	follow := map[string]bool{}
 	for _, k := range cfg.FollowKinds {
@@ -189,18 +227,14 @@ func processPackage(ctx context.Context, cfg Config, item store.FrontierItem) (p
 	}
 	nextHop := map[string]bool{}
 
-	for _, version := range versions {
+	for _, pv := range todo {
 		if ctx.Err() != nil {
 			return stats, ctx.Err()
 		}
-		if done[version] {
-			stats.skipped++
-			continue
-		}
 
-		result, deps := scanVersion(ctx, cfg, packument, version)
+		result, deps := scanVersion(ctx, cfg, pv)
 		if err := cfg.Store.SaveVersion(ctx, packageID, result); err != nil {
-			return stats, fmt.Errorf("saving %s@%s: %w", item.Name, version, err)
+			return stats, fmt.Errorf("saving %s@%s: %w", item.Name, pv.version, err)
 		}
 		stats.versions++
 		stats.urls += len(result.Findings)
@@ -230,18 +264,22 @@ func processPackage(ctx context.Context, cfg Config, item store.FrontierItem) (p
 	return stats, nil
 }
 
+// pendingVersion is one version's manifest, lifted out of the packument so the
+// rest of that document can be released before any tarball is fetched.
+type pendingVersion struct {
+	version   string
+	manifest  json.RawMessage
+	published *time.Time
+}
+
 // scanVersion extracts everything from one version. A failure to read the
 // tarball is recorded on the version row rather than returned, so that the
 // metadata findings - which are often the valuable ones - are still kept and
 // the version is retried on a later run.
-func scanVersion(ctx context.Context, cfg Config, packument *registry.Packument, version string) (store.VersionResult, []registry.Dependency) {
-	result := store.VersionResult{Version: version}
+func scanVersion(ctx context.Context, cfg Config, pv pendingVersion) (store.VersionResult, []registry.Dependency) {
+	result := store.VersionResult{Version: pv.version, PublishedAt: pv.published}
 
-	if t, ok := packument.PublishedAt(version); ok {
-		result.PublishedAt = &t
-	}
-
-	manifest, err := registry.ParseManifest(packument.Versions[version])
+	manifest, err := registry.ParseManifest(pv.manifest)
 	if err != nil {
 		result.Err = fmt.Sprintf("parse manifest: %v", err)
 		return result, nil
@@ -254,7 +292,7 @@ func scanVersion(ctx context.Context, cfg Config, packument *registry.Packument,
 	fromManifest := map[string]bool{}
 	for _, f := range manifest.URLs {
 		fromManifest[f.URL.Normalized] = true
-		result.Findings = append(result.Findings, toFinding(f.URL, f.Kind, f.Location, 0, f.Snippet))
+		result.Findings = append(result.Findings, toFinding(f.URL, f.Kind, f.Location, 0))
 	}
 
 	if manifest.TarballURL == "" {
@@ -279,7 +317,7 @@ func scanVersion(ctx context.Context, cfg Config, packument *registry.Packument,
 		if f.Path == "package.json" && fromManifest[f.URL.Normalized] {
 			continue
 		}
-		result.Findings = append(result.Findings, toFinding(f.URL, f.Kind, f.Path, f.Line, f.Snippet))
+		result.Findings = append(result.Findings, toFinding(f.URL, f.Kind, f.Path, f.Line))
 	}
 	return result, manifest.Deps
 }
@@ -309,7 +347,7 @@ func scanTarball(ctx context.Context, cfg Config, manifest *registry.Manifest) (
 	return counter.n, hex.EncodeToString(hasher.Sum(nil)), findings, scanErr
 }
 
-func toFinding(u extract.URL, kind extract.SourceKind, location string, line int, snippet string) store.Finding {
+func toFinding(u extract.URL, kind extract.SourceKind, location string, line int) store.Finding {
 	return store.Finding{
 		URL:               u.Normalized,
 		Scheme:            u.Scheme,
@@ -321,7 +359,6 @@ func toFinding(u extract.URL, kind extract.SourceKind, location string, line int
 		SourceKind:        string(kind),
 		Location:          location,
 		Line:              line,
-		Snippet:           snippet,
 	}
 }
 

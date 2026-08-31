@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"sort"
 	"syscall"
 
@@ -71,7 +72,11 @@ func runCrawl(ctx context.Context, args []string) error {
 	depth := fs.Int("depth", -1, "hops from the seed: 0 crawls the seeds alone, 1 adds their direct dependencies (-1 = unlimited)")
 	strategy := fs.String("sample", "minor", "version sampling: minor, major or all")
 	prerelease := fs.Bool("prerelease", false, "include prerelease versions")
-	concurrency := fs.Int("concurrency", 8, "packages processed in parallel")
+	// Each worker holds a package's manifests and one version's findings, so
+	// concurrency costs memory as much as CPU. Defaulting to the core count
+	// keeps a small machine from being OOM-killed; a fixed 8 was enough to do
+	// exactly that on a 2-core, 4 GB host.
+	concurrency := fs.Int("concurrency", runtime.NumCPU(), "packages processed in parallel")
 	rps := fs.Float64("rate", 10, "registry requests per second")
 	maxDecomp := fs.Int64("max-decompressed", 2<<30, "per-version decompression ceiling in bytes")
 	attempts := fs.Int("attempts", 3, "attempts before a package is parked as failed")
