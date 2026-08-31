@@ -107,3 +107,87 @@ func TestHostsTableSkipsUnresolvableHosts(t *testing.T) {
 		t.Errorf("urls = %d, want 3: filtering the worklist must not drop data", n)
 	}
 }
+
+// attempts is a retry budget for genuine failures. Claiming a package - which
+// happens again after every crash, interruption or restart - must not spend it.
+func TestAttemptsCountFailuresNotClaims(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(filepath.Join(t.TempDir(), "corpus.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.Seed(ctx, "npm", []string{"thing"}); err != nil {
+		t.Fatal(err)
+	}
+
+	attempts := func() int {
+		var n int
+		if err := db.DB().QueryRow(`SELECT attempts FROM frontier WHERE name='thing'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	status := func() string {
+		var s string
+		if err := db.DB().QueryRow(`SELECT status FROM frontier WHERE name='thing'`).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// Five interrupted runs: claimed, then released without ever failing.
+	for i := 0; i < 5; i++ {
+		item, err := db.Claim(ctx, "npm", -1)
+		if err != nil || item == nil {
+			t.Fatalf("claim %d: %v (item %v)", i, err, item)
+		}
+		if _, err := db.ReleaseClaimed(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := attempts(); got != 0 {
+		t.Errorf("after 5 interrupted claims attempts = %d, want 0", got)
+	}
+	if got := status(); got != "pending" {
+		t.Errorf("status = %q, want pending", got)
+	}
+
+	// Now two real failures against a budget of three.
+	for i := 1; i <= 2; i++ {
+		item, err := db.Claim(ctx, "npm", -1)
+		if err != nil || item == nil {
+			t.Fatalf("claim: %v", err)
+		}
+		if err := db.Fail(ctx, item.ID, "boom", 3); err != nil {
+			t.Fatal(err)
+		}
+		if got := attempts(); got != i {
+			t.Errorf("after %d failure(s) attempts = %d", i, got)
+		}
+		if got := status(); got != "pending" {
+			t.Errorf("after %d failure(s) status = %q, want pending", i, got)
+		}
+	}
+
+	// The third exhausts the budget and parks it.
+	item, err := db.Claim(ctx, "npm", -1)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := db.Fail(ctx, item.ID, "boom", 3); err != nil {
+		t.Fatal(err)
+	}
+	if got, st := attempts(), status(); got != 3 || st != "failed" {
+		t.Errorf("attempts=%d status=%q, want 3/failed", got, st)
+	}
+
+	// Seeding it explicitly is the way back in.
+	if err := db.Seed(ctx, "npm", []string{"thing"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, st := attempts(), status(); got != 0 || st != "pending" {
+		t.Errorf("after reseed attempts=%d status=%q, want 0/pending", got, st)
+	}
+}

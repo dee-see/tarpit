@@ -74,6 +74,15 @@ func migrate(db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// attempts used to be incremented on claim rather than on failure, so a
+	// corpus written by an older build carries counts inflated by restarts. A
+	// row that never recorded an error never actually failed, so its count is
+	// pure noise and would otherwise park the package early.
+	if _, err := db.Exec(
+		`UPDATE frontier SET attempts = 0 WHERE attempts > 0 AND last_error IS NULL`); err != nil {
+		return err
+	}
+
 	if !hasSnippet {
 		return nil
 	}
@@ -392,8 +401,11 @@ func (s *Store) Claim(ctx context.Context, ecosystem string, maxDepth int) (*Fro
 
 	var item FrontierItem
 	err := s.write(ctx, func(tx *sql.Tx) error {
+		// attempts is deliberately not touched here. It counts failures, not
+		// claims: a package interrupted by a crash or a restart has not failed,
+		// and must not burn through its retry budget on the way back.
 		return tx.QueryRowContext(ctx, `
-			UPDATE frontier SET status = 'claimed', claimed_at = ?, attempts = attempts + 1
+			UPDATE frontier SET status = 'claimed', claimed_at = ?
 			WHERE id = (
 				SELECT id FROM frontier
 				WHERE status = 'pending' AND ecosystem = ?`+depthClause+`
@@ -419,13 +431,21 @@ func (s *Store) Complete(ctx context.Context, id int64) error {
 	})
 }
 
-// Fail records an error against a package. Below maxAttempts it goes back to
-// pending for a later run to retry; past that it is parked as failed.
+// Fail records an error against a package and counts it. Below maxAttempts the
+// package goes back to pending for a later run to retry; past that it is parked
+// as failed.
+//
+// This is the only place attempts is incremented, so the count means what it
+// says. It used to be bumped on every claim instead, which meant an unrelated
+// crash - or simply restarting the crawler - spent the budget: after seven
+// restarts aws-sdk sat at attempts=7 without ever having failed, one genuine
+// error away from being parked permanently.
 func (s *Store) Fail(ctx context.Context, id int64, reason string, maxAttempts int) error {
 	return s.write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			UPDATE frontier
-			SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'pending' END,
+			SET attempts = attempts + 1,
+			    status = CASE WHEN attempts + 1 >= ? THEN 'failed' ELSE 'pending' END,
 			    claimed_at = NULL, last_error = ?
 			WHERE id = ?`, maxAttempts, reason, id)
 		return err
