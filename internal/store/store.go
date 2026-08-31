@@ -39,7 +39,46 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate %s: %w", path, err)
+	}
 	return &Store{db: db}, nil
+}
+
+// migrate brings an existing corpus up to the current schema.
+//
+// Dropping snippet rewrites url_occurrences, which on a large corpus is slow -
+// but leaving it would break inserts, since the column is NOT NULL and is no
+// longer written.
+func migrate(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(url_occurrences)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	hasSnippet := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "snippet" {
+			hasSnippet = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasSnippet {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE url_occurrences DROP COLUMN snippet`)
+	return err
 }
 
 // Close releases the database.
@@ -136,7 +175,6 @@ type Finding struct {
 	SourceKind        string
 	Location          string
 	Line              int
-	Snippet           string
 }
 
 // VersionResult is everything learned about one package version.
@@ -210,9 +248,9 @@ func (s *Store) SaveVersion(ctx context.Context, packageID int64, r VersionResul
 			}
 			res, err := tx.ExecContext(ctx,
 				`INSERT OR IGNORE INTO url_occurrences
-					(url_id, version_id, source_kind, location, line, snippet)
-				 VALUES (?, ?, ?, ?, ?, ?)`,
-				urlID, versionID, f.SourceKind, text(f.Location), f.Line, text(f.Snippet))
+					(url_id, version_id, source_kind, location, line)
+				 VALUES (?, ?, ?, ?, ?)`,
+				urlID, versionID, f.SourceKind, text(f.Location), f.Line)
 			if err != nil {
 				return err
 			}

@@ -148,9 +148,6 @@ func TestScanDedupesWithinFile(t *testing.T) {
 	if findings[0].Line != 1 {
 		t.Errorf("line = %d, want first occurrence (1)", findings[0].Line)
 	}
-	if findings[0].Snippet != "see https://repeat.example.com/x" {
-		t.Errorf("snippet = %q", findings[0].Snippet)
-	}
 }
 
 func TestScanEnforcesDecompressionCeiling(t *testing.T) {

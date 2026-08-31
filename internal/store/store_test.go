@@ -31,20 +31,20 @@ func TestSaveVersionSanitizesInvalidUTF8(t *testing.T) {
 		Findings: []Finding{{
 			URL: bad, Scheme: "https", Host: "example.com",
 			RegistrableDomain: "example.com", SourceKind: "file_source",
-			Location: "a\xff.js", Snippet: "x = '\xff\xfe'",
+			Location: "a\xff.js",
 		}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	var url, location, snippet string
+	var url, location string
 	if err := db.DB().QueryRow(`
-		SELECT u.url, o.location, o.snippet
+		SELECT u.url, o.location
 		FROM url_occurrences o JOIN urls u ON u.id = o.url_id`).
-		Scan(&url, &location, &snippet); err != nil {
+		Scan(&url, &location); err != nil {
 		t.Fatal(err)
 	}
-	for name, got := range map[string]string{"url": url, "location": location, "snippet": snippet} {
+	for name, got := range map[string]string{"url": url, "location": location} {
 		if !utf8.ValidString(got) {
 			t.Errorf("%s is not valid UTF-8: %q", name, got)
 		}

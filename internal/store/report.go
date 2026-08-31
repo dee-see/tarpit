@@ -84,7 +84,6 @@ type ExportRow struct {
 	SourceKind        string `json:"source_kind"`
 	Location          string `json:"location"`
 	Line              int    `json:"line,omitempty"`
-	Snippet           string `json:"snippet,omitempty"`
 }
 
 // Export streams every occurrence in the corpus to fn, ordered so that the
@@ -94,7 +93,7 @@ func (s *Store) Export(ctx context.Context, fn func(ExportRow) error) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT u.url, u.host, u.registrable_domain, u.has_placeholder,
 		       p.ecosystem, p.name, v.version, COALESCE(v.published_at, ''),
-		       o.source_kind, o.location, o.line, o.snippet
+		       o.source_kind, o.location, o.line
 		FROM url_occurrences o
 		JOIN urls u             ON u.id = o.url_id
 		JOIN package_versions v ON v.id = o.version_id
@@ -120,7 +119,7 @@ func (s *Store) Export(ctx context.Context, fn func(ExportRow) error) error {
 		var r ExportRow
 		if err := rows.Scan(&r.URL, &r.Host, &r.RegistrableDomain, &r.HasPlaceholder,
 			&r.Ecosystem, &r.Package, &r.Version, &r.PublishedAt,
-			&r.SourceKind, &r.Location, &r.Line, &r.Snippet); err != nil {
+			&r.SourceKind, &r.Location, &r.Line); err != nil {
 			return err
 		}
 		if err := fn(r); err != nil {

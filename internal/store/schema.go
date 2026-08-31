@@ -62,7 +62,6 @@ CREATE TABLE IF NOT EXISTS url_occurrences (
   source_kind TEXT NOT NULL,
   location    TEXT NOT NULL,
   line        INTEGER NOT NULL,
-  snippet     TEXT NOT NULL,
   UNIQUE(url_id, version_id, source_kind, location)
 );
 CREATE INDEX IF NOT EXISTS idx_occ_version ON url_occurrences(version_id);

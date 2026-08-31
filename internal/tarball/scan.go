@@ -22,8 +22,6 @@ const (
 	// overlap is carried between chunks so that a URL straddling a chunk
 	// boundary is still matched in full.
 	overlap = 8 << 10 // 8 KiB
-	// maxSnippet caps the stored context line.
-	maxSnippet = 200
 )
 
 var newline = []byte{'\n'}
@@ -35,11 +33,10 @@ var ErrTooLarge = errors.New("archive exceeded decompression ceiling")
 
 // Finding is one URL sighting inside an archive.
 type Finding struct {
-	Path    string
-	Line    int
-	Kind    extract.SourceKind
-	URL     extract.URL
-	Snippet string
+	Path string
+	Line int
+	Kind extract.SourceKind
+	URL  extract.URL
 }
 
 // Options configures a scan.
@@ -138,19 +135,23 @@ func scanFile(r io.Reader, name string, kind extract.SourceKind) ([]Finding, err
 	var (
 		findings []Finding
 		seen     = map[string]bool{}
-		carry    []byte
 		lineAt   = 1
 	)
 
+	// The window and carry buffers are allocated once and reused. Appending to
+	// a nil slice per chunk instead - which is what this used to do - churns
+	// two multi-megabyte allocations for every megabyte read, across every file
+	// of every version, which is enough garbage to push resident memory past
+	// what a small host has.
 	buf := make([]byte, chunkSize)
+	window := make([]byte, 0, chunkSize+overlap)
+	carry := make([]byte, 0, overlap)
+
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			window := append(carry, buf[:n]...)
-			final := false
-			if err == io.EOF {
-				final = true
-			}
+			window = append(append(window[:0], carry...), buf[:n]...)
+			final := err == io.EOF
 			emit(window, name, kind, lineAt, final, seen, &findings)
 
 			keep := overlap
@@ -159,7 +160,7 @@ func scanFile(r io.Reader, name string, kind extract.SourceKind) ([]Finding, err
 			}
 			consumed := window[:len(window)-keep]
 			lineAt += bytes.Count(consumed, newline)
-			carry = append([]byte(nil), window[len(window)-keep:]...)
+			carry = append(carry[:0], window[len(window)-keep:]...)
 		}
 		if err == io.EOF {
 			break
@@ -189,31 +190,12 @@ func emit(window []byte, name string, kind extract.SourceKind, lineAt int, final
 		}
 		seen[u.Normalized] = true
 		*out = append(*out, Finding{
-			Path:    name,
-			Line:    lineAt + bytes.Count(window[:m.Offset], newline),
-			Kind:    kind,
-			URL:     u,
-			Snippet: snippet(window, m.Offset),
+			Path: name,
+			Line: lineAt + bytes.Count(window[:m.Offset], newline),
+			Kind: kind,
+			URL:  u,
 		})
 	}
-}
-
-// snippet returns the line containing offset, trimmed and length-capped, to give
-// a human triaging the corpus enough context to judge a finding at a glance.
-func snippet(b []byte, offset int) string {
-	start := 0
-	if i := bytes.LastIndexByte(b[:offset], '\n'); i >= 0 {
-		start = i + 1
-	}
-	end := len(b)
-	if i := bytes.IndexByte(b[offset:], '\n'); i >= 0 {
-		end = offset + i
-	}
-	s := strings.TrimSpace(string(b[start:end]))
-	if len(s) > maxSnippet {
-		s = s[:maxSnippet]
-	}
-	return s
 }
 
 // classify maps an archive path to a source kind. Install scripts are checked
