@@ -31,7 +31,6 @@ type Config struct {
 	// their direct dependencies. Negative means unlimited.
 	MaxDepth    int
 	Concurrency int
-	MaxDecomp   int64
 	MaxAttempts int
 	Logf        func(string, ...any)
 }
@@ -336,8 +335,7 @@ func scanTarball(ctx context.Context, cfg Config, manifest *registry.Manifest) (
 	stream := io.TeeReader(body, io.MultiWriter(hasher, counter))
 
 	findings, scanErr := tarball.Scan(stream, tarball.Options{
-		MaxDecompressed: cfg.MaxDecomp,
-		InstallScripts:  manifest.InstallScriptFiles,
+		InstallScripts: manifest.InstallScriptFiles,
 	})
 
 	// Drain whatever the scanner did not consume so the hash and byte count

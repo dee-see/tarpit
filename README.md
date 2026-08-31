@@ -64,11 +64,36 @@ metadata_binary | sqlite3@4.2.0  | mapbox-node-binary.s3.amazonaws.com | binary.
 | `--depth N` | Hops from the seed. `0` is the seeds alone, `-1` (default) is unlimited. |
 | `--sample minor\|major\|all` | Version density. Default `minor`: the highest patch of each release line. |
 | `--dev` | Also follow devDependencies. Incremental - see below. |
+| `--no-optional`, `--peer` | Adjust which dependency kinds are followed. |
+| `--prerelease` | Include `-alpha` / `-rc` versions, which are skipped by default. |
 | `--rate N` | Registry requests per second. Default 10. |
-| `--concurrency N` | Packages in flight. Default 8. |
+| `--concurrency N` | Packages in flight. Defaults to the machine's core count. |
+| `--attempts N` | Failures before a package is parked. Default 3. Interruptions do not count. |
 
 The crawl is a persistent queue in SQLite, so it runs until you stop it and resumes where it
-left off. Interrupt it with Ctrl-C and rerun the same command.
+left off. Interrupt it with Ctrl-C and rerun the same command; anything left in flight by a
+process that died is recovered on the next start.
+
+### Scale
+
+Crawling the full transitive tree from `react`, sampling one version per minor line:
+
+```
+4,593 packages     61,140 versions     33.4 GB streamed
+7,239 hosts        5,395 registrable domains
+281,745 distinct URLs across 7.6M occurrences
+max depth 32       1.1 GB corpus
+```
+
+Of those 7.6M occurrences, 1,389 are install-time (`file_install_script`, `metadata_dep_spec`,
+`metadata_binary`) - 0.018%. That ratio is the whole reason `source_kind` is recorded per
+occurrence rather than filtered at extraction time.
+
+Two packages dominated the cost, in opposite ways. `aws-sdk` bumps its minor on nearly every
+release, so minor sampling kept 1,712 of its 1,936 versions and it ran for twelve hours while
+contributing almost no new hosts. `flow-bin` ships a compiled binary per platform per release,
+averaging 29 MB a version across 329 of them. Sampling density is the lever for the first shape;
+there is currently no good lever for the second.
 
 ## How it works
 

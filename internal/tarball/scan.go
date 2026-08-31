@@ -42,7 +42,13 @@ type Finding struct {
 // Options configures a scan.
 type Options struct {
 	// MaxDecompressed aborts the scan once this many bytes have been
-	// decompressed. Zero means 2 GiB.
+	// decompressed. Zero means the default 2 GiB.
+	//
+	// This is a decompression-bomb guard, not a size filter: the default sits
+	// far above any real package, so it never fires in normal operation. It was
+	// exposed as a flag once, which only invited tuning a number that should
+	// never need tuning; bounding crawl cost is the sampler's job, not this
+	// one's.
 	MaxDecompressed int64
 	// InstallScripts holds archive-relative paths referenced by the package's
 	// install hooks. Files in this set are classified FileInstallScript, the

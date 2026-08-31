@@ -78,7 +78,6 @@ func runCrawl(ctx context.Context, args []string) error {
 	// exactly that on a 2-core, 4 GB host.
 	concurrency := fs.Int("concurrency", runtime.NumCPU(), "packages processed in parallel")
 	rps := fs.Float64("rate", 10, "registry requests per second")
-	maxDecomp := fs.Int64("max-decompressed", 2<<30, "per-version decompression ceiling in bytes")
 	attempts := fs.Int("attempts", 3, "attempts before a package is parked as failed")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: tarpit crawl [flags] <package>...\n\nFlags:\n")
@@ -132,7 +131,6 @@ func runCrawl(ctx context.Context, args []string) error {
 		FollowKinds: kinds,
 		MaxDepth:    *depth,
 		Concurrency: *concurrency,
-		MaxDecomp:   *maxDecomp,
 		MaxAttempts: *attempts,
 		Logf:        log.Printf,
 	}
