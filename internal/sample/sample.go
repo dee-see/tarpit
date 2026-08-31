@@ -8,6 +8,7 @@
 package sample
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -108,12 +109,7 @@ func canonical(v string) string {
 }
 
 func contains(haystack []string, needle string) bool {
-	for _, v := range haystack {
-		if v == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }
 
 // Sort orders versions oldest to newest. Anything that is not valid semver

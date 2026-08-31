@@ -79,9 +79,7 @@ func Run(ctx context.Context, cfg Config, seeds []string) (Result, error) {
 	)
 
 	for i := 0; i < cfg.Concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for ctx.Err() == nil {
 				item, err := cfg.Store.Claim(ctx, cfg.Ecosystem, cfg.MaxDepth)
 				if err != nil {
@@ -126,7 +124,7 @@ func Run(ctx context.Context, cfg Config, seeds []string) (Result, error) {
 					cfg.Logf("completing %s: %v", item.Name, err)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

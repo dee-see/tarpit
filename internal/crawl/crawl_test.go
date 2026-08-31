@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -84,9 +85,7 @@ func newFakeRegistryWith(t *testing.T, pkgs map[string]fakePkg, extra map[string
 			manifest["scripts"] = p.scripts
 		}
 		if name == "root" {
-			for k, v := range extra {
-				manifest[k] = v
-			}
+			maps.Copy(manifest, extra)
 		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"name":      name,

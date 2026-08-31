@@ -160,10 +160,7 @@ func scanFile(r io.Reader, name string, kind extract.SourceKind) ([]Finding, err
 			final := err == io.EOF
 			emit(window, name, kind, lineAt, final, seen, &findings)
 
-			keep := overlap
-			if len(window) < keep {
-				keep = len(window)
-			}
+			keep := min(len(window), overlap)
 			consumed := window[:len(window)-keep]
 			lineAt += bytes.Count(consumed, newline)
 			carry = append(carry[:0], window[len(window)-keep:]...)
@@ -227,7 +224,7 @@ func classify(name string, installScripts map[string]bool) extract.SourceKind {
 	case ".md", ".markdown", ".rst", ".txt", ".adoc":
 		return extract.FileDocs
 	}
-	for _, seg := range strings.Split(lower, "/") {
+	for seg := range strings.SplitSeq(lower, "/") {
 		switch seg {
 		case "test", "tests", "spec", "specs", "__tests__", "fixtures", "e2e":
 			return extract.FileTest

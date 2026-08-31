@@ -138,7 +138,7 @@ func TestAttemptsCountFailuresNotClaims(t *testing.T) {
 	}
 
 	// Five interrupted runs: claimed, then released without ever failing.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		item, err := db.Claim(ctx, "npm", -1)
 		if err != nil || item == nil {
 			t.Fatalf("claim %d: %v (item %v)", i, err, item)

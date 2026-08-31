@@ -19,7 +19,7 @@ func TestRetainerMatchesPick(t *testing.T) {
 		for _, pre := range []bool{false, true} {
 			opts := Options{Strategy: strategy, IncludePrerelease: pre}
 
-			for attempt := 0; attempt < 20; attempt++ {
+			for attempt := range 20 {
 				shuffled := append([]string(nil), versions...)
 				rng := rand.New(rand.NewSource(int64(attempt)))
 				rng.Shuffle(len(shuffled), func(i, j int) {
