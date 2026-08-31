@@ -4,6 +4,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
@@ -101,11 +102,12 @@ func (p *Packument) PublishedAt(version string) (time.Time, bool) {
 //
 // The full document is requested rather than the abbreviated "install-v1"
 // variant, because the abbreviated form omits `scripts` - precisely where
-// install-time fetches live. The full document is also enormous: aws-sdk's is
-// hundreds of megabytes, holding a manifest for each of its 1936 published
-// versions plus readmes. Decoding it whole is what got this process
-// OOM-killed, so it is walked as a token stream instead and only the sampled
-// manifests are ever materialised.
+// install-time fetches live. The cost of that is size: the largest documents in
+// an npm dependency tree run 10-15 MB (aws-sdk 10.1, typescript 14.9), and
+// decoding one whole allocates about 43 MB. Multiplied by the worker count that
+// is worth avoiding, so the document is walked as a token stream and only the
+// sampled manifests are ever materialised - about 20 MB with encoding/json,
+// and 1 MB with jsontext, which is why this uses the latter.
 func (c *Client) Packument(ctx context.Context, name string, retain ManifestRetainer) (*Packument, error) {
 	resp, err := c.get(ctx, c.BaseURL+"/"+escapePackageName(name), "application/json")
 	if err != nil {
@@ -114,23 +116,26 @@ func (c *Client) Packument(ctx context.Context, name string, retain ManifestReta
 	defer resp.Body.Close()
 
 	p := &Packument{Versions: map[string]json.RawMessage{}}
-	dec := json.NewDecoder(resp.Body)
+	dec := jsontext.NewDecoder(resp.Body)
 
-	if err := expectDelim(dec, '{'); err != nil {
+	if err := expectObjectStart(dec); err != nil {
 		return nil, fmt.Errorf("decode packument for %s: %w", name, err)
 	}
-	for dec.More() {
-		tok, err := dec.Token()
+	for {
+		tok, err := dec.ReadToken()
 		if err != nil {
 			return nil, fmt.Errorf("decode packument for %s: %w", name, err)
 		}
-		key, _ := tok.(string)
+		if tok.Kind() == '}' {
+			break
+		}
+		key := tok.String()
 
 		switch key {
 		case "name":
-			err = dec.Decode(&p.Name)
+			err = decodeInto(dec, &p.Name)
 		case "dist-tags":
-			err = dec.Decode(&p.DistTags)
+			err = decodeInto(dec, &p.DistTags)
 		case "time":
 			p.Time, err = decodeTimes(dec)
 		case "versions":
@@ -138,7 +143,7 @@ func (c *Client) Packument(ctx context.Context, name string, retain ManifestReta
 		default:
 			// Skipped without being built. The top-level readme alone is often
 			// megabytes and nothing here reads it.
-			err = skipValue(dec)
+			err = dec.SkipValue()
 		}
 		if err != nil {
 			return nil, fmt.Errorf("decode packument for %s at %q: %w", name, key, err)
@@ -147,18 +152,46 @@ func (c *Client) Packument(ctx context.Context, name string, retain ManifestReta
 	return p, nil
 }
 
-// streamVersions walks the "versions" object, deciding what to keep from each
-// key before its value is read.
-func streamVersions(dec *json.Decoder, p *Packument, retain ManifestRetainer) error {
-	if err := expectDelim(dec, '{'); err != nil {
+// decodeInto reads the next value and unmarshals it with encoding/json.
+//
+// The streaming walk uses jsontext because that is where the allocations were;
+// individual values stay on encoding/json, whose looser behaviour around
+// duplicate keys and type mismatches this corpus depends on - packages
+// published in 2011 violate the schema constantly.
+func decodeInto(dec *jsontext.Decoder, target any) error {
+	val, err := dec.ReadValue()
+	if err != nil {
 		return err
 	}
-	for dec.More() {
-		tok, err := dec.Token()
+	return json.Unmarshal(val, target)
+}
+
+func expectObjectStart(dec *jsontext.Decoder) error {
+	tok, err := dec.ReadToken()
+	if err != nil {
+		return err
+	}
+	if tok.Kind() != '{' {
+		return fmt.Errorf("expected an object, got %q", tok.Kind())
+	}
+	return nil
+}
+
+// streamVersions walks the "versions" object, deciding what to keep from each
+// key before its value is read.
+func streamVersions(dec *jsontext.Decoder, p *Packument, retain ManifestRetainer) error {
+	if err := expectObjectStart(dec); err != nil {
+		return err
+	}
+	for {
+		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		version, _ := tok.(string)
+		if tok.Kind() == '}' {
+			return nil
+		}
+		version := tok.String()
 		p.published = append(p.published, version)
 
 		keep, evict := true, ""
@@ -169,19 +202,19 @@ func streamVersions(dec *json.Decoder, p *Packument, retain ManifestRetainer) er
 			delete(p.Versions, evict)
 		}
 		if !keep {
-			if err := skipValue(dec); err != nil {
+			if err := dec.SkipValue(); err != nil {
 				return err
 			}
 			continue
 		}
 
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
+		val, err := dec.ReadValue()
+		if err != nil {
 			return err
 		}
-		p.Versions[version] = raw
+		// ReadValue may hand back the decoder's own buffer, so this has to copy.
+		p.Versions[version] = append(json.RawMessage(nil), val...)
 	}
-	return expectDelim(dec, '}')
 }
 
 // VersionManifest fetches a single version's manifest directly. Used to
@@ -209,9 +242,9 @@ func (c *Client) VersionManifest(ctx context.Context, name, version string) (jso
 // of old packages carry an object where a timestamp belongs, and decoding
 // strictly threw away the whole document - and with it every version of the
 // package - over one malformed entry.
-func decodeTimes(dec *json.Decoder) (map[string]string, error) {
+func decodeTimes(dec *jsontext.Decoder) (map[string]string, error) {
 	var raw map[string]json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
+	if err := decodeInto(dec, &raw); err != nil {
 		return nil, err
 	}
 	out := make(map[string]string, len(raw))
@@ -222,39 +255,6 @@ func decodeTimes(dec *json.Decoder) (map[string]string, error) {
 		}
 	}
 	return out, nil
-}
-
-func expectDelim(dec *json.Decoder, want json.Delim) error {
-	tok, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	if got, ok := tok.(json.Delim); !ok || got != want {
-		return fmt.Errorf("expected %q, got %v", want, tok)
-	}
-	return nil
-}
-
-// skipValue consumes the next JSON value without constructing it.
-func skipValue(dec *json.Decoder) error {
-	depth := 0
-	for {
-		tok, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if d, ok := tok.(json.Delim); ok {
-			switch d {
-			case '{', '[':
-				depth++
-			case '}', ']':
-				depth--
-			}
-		}
-		if depth == 0 {
-			return nil
-		}
-	}
 }
 
 // Tarball opens a version's artifact for streaming. The caller must close it.

@@ -1,6 +1,6 @@
 module github.com/dee-see/tarpit
 
-go 1.25.0
+go 1.27.0
 
 require (
 	golang.org/x/mod v0.40.0
