@@ -39,7 +39,6 @@ type MetaFinding struct {
 type Manifest struct {
 	Version    string
 	TarballURL string
-	Shasum     string
 	Deps       []Dependency
 	// InstallScriptFiles are archive-relative paths that install-time hooks
 	// invoke. The scanner uses these to classify those files as
@@ -82,7 +81,6 @@ func ParseManifest(raw json.RawMessage) (*Manifest, error) {
 	if dist, ok := fields["dist"]; ok {
 		d := decodeStringMap(dist)
 		m.TarballURL = d["tarball"]
-		m.Shasum = d["shasum"]
 	}
 
 	seen := map[string]bool{}

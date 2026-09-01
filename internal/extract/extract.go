@@ -74,7 +74,6 @@ type Match struct {
 
 // URL is a normalized URL ready to be stored.
 type URL struct {
-	Raw               string
 	Normalized        string
 	Scheme            string
 	Host              string
@@ -115,7 +114,7 @@ func Normalize(raw string) (URL, bool) {
 		return URL{}, false
 	}
 
-	u := URL{Raw: raw, HasPlaceholder: placeholderRe.MatchString(raw)}
+	u := URL{HasPlaceholder: placeholderRe.MatchString(raw)}
 
 	var scheme, rest string
 	if strings.HasPrefix(raw, "//") {

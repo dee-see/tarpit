@@ -5,10 +5,12 @@
 // usually persists unchanged across every 1.4.x patch. Sampling one version per
 // release line keeps coverage of every point where a URL could have been
 // introduced or removed, at a fraction of the cost.
+//
+// The selection itself lives in Retainer, which decides incrementally so that
+// the registry document never has to be held whole.
 package sample
 
 import (
-	"slices"
 	"sort"
 	"strings"
 
@@ -39,58 +41,6 @@ type Options struct {
 	// IncludePrerelease keeps -alpha/-beta/-rc versions, which are excluded by
 	// default: they are rarely depended on, and they inflate the sample.
 	IncludePrerelease bool
-	// Latest is the version behind the "latest" dist-tag. It is always kept,
-	// whatever the strategy, because it is what a fresh install resolves to.
-	Latest string
-}
-
-// Pick returns the subset of versions to scan, sorted oldest to newest.
-// Versions that are not valid semver are skipped, since they cannot be grouped
-// into a release line; npm has rejected them at publish time for many years.
-func Pick(versions []string, opts Options) []string {
-	keep := map[string]bool{}
-	if opts.Latest != "" && contains(versions, opts.Latest) {
-		keep[opts.Latest] = true
-	}
-
-	best := map[string]string{} // release line -> highest version in it
-	for _, v := range versions {
-		sv := canonical(v)
-		if sv == "" {
-			continue
-		}
-		if !opts.IncludePrerelease && semver.Prerelease(sv) != "" {
-			continue
-		}
-		if opts.Strategy == All {
-			keep[v] = true
-			continue
-		}
-
-		line := semver.MajorMinor(sv)
-		if opts.Strategy == Major {
-			line = semver.Major(sv)
-		}
-		if cur, ok := best[line]; !ok || semver.Compare(canonical(cur), sv) < 0 {
-			best[line] = v
-		}
-	}
-	for _, v := range best {
-		keep[v] = true
-	}
-
-	out := make([]string, 0, len(keep))
-	for v := range keep {
-		out = append(out, v)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := canonical(out[i]), canonical(out[j])
-		if c := semver.Compare(a, b); c != 0 {
-			return c < 0
-		}
-		return out[i] < out[j]
-	})
-	return out
 }
 
 // canonical converts an npm version string into the "v"-prefixed form
@@ -106,10 +56,6 @@ func canonical(v string) string {
 		return ""
 	}
 	return v
-}
-
-func contains(haystack []string, needle string) bool {
-	return slices.Contains(haystack, needle)
 }
 
 // Sort orders versions oldest to newest. Anything that is not valid semver

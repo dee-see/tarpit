@@ -45,7 +45,7 @@ func TestRetainerMatchesPick(t *testing.T) {
 				for v := range retained {
 					got = append(got, v)
 				}
-				want := Pick(versions, opts)
+				want := pick(versions, opts, "")
 				sort.Strings(got)
 				sortedWant := append([]string(nil), want...)
 				sort.Strings(sortedWant)

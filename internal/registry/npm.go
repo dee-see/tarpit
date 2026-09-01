@@ -58,19 +58,13 @@ type ManifestRetainer interface {
 }
 
 // Packument is the registry document for a package. Versions holds only the
-// manifests a ManifestRetainer asked to keep; published lists every version
-// string that went past, retained or not.
+// manifests a ManifestRetainer asked to keep.
 type Packument struct {
-	Name      string
-	DistTags  map[string]string
-	Versions  map[string]json.RawMessage
-	Time      map[string]string
-	published []string
+	Name     string
+	DistTags map[string]string
+	Versions map[string]json.RawMessage
+	Time     map[string]string
 }
-
-// VersionList returns every published version string, including those whose
-// manifests were not retained.
-func (p *Packument) VersionList() []string { return p.published }
 
 // Retained returns the versions whose manifests are in hand.
 func (p *Packument) Retained() []string {
@@ -192,7 +186,6 @@ func streamVersions(dec *jsontext.Decoder, p *Packument, retain ManifestRetainer
 			return nil
 		}
 		version := tok.String()
-		p.published = append(p.published, version)
 
 		keep, evict := true, ""
 		if retain != nil {

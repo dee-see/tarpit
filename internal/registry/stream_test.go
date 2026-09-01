@@ -68,16 +68,7 @@ func TestPackumentRetainsOnlySampledManifests(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Every published version is still listed...
-	got := append([]string(nil), p.VersionList()...)
-	sort.Strings(got)
-	want := append([]string(nil), all...)
-	sort.Strings(want)
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("VersionList = %v, want all %v", got, want)
-	}
-
-	// ...but only the sampled ones had their manifests built.
+	// Only the sampled versions had their manifests built.
 	retained := p.Retained()
 	sort.Strings(retained)
 	if strings.Join(retained, ",") != "1.0.2,1.1.5,2.0.3" {
