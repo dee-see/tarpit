@@ -75,6 +75,8 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
+	reshaped := false
+
 	occ, err := tableColumns(db, "url_occurrences")
 	if err != nil {
 		return err
@@ -85,6 +87,7 @@ func migrate(db *sql.DB) error {
 		if err := collapseOccurrences(ctx, db); err != nil {
 			return fmt.Errorf("collapse url_occurrences: %w", err)
 		}
+		reshaped = true
 	}
 
 	// urls kept a parsed copy of each URL beside the URL it was parsed from.
@@ -97,6 +100,17 @@ func migrate(db *sql.DB) error {
 			if _, err := db.ExecContext(ctx, `ALTER TABLE urls DROP COLUMN `+c); err != nil {
 				return err
 			}
+			reshaped = true
+		}
+	}
+
+	// Vacuum last, once every change is in. Dropping a column shortens rows
+	// where they sit rather than freeing whole pages, so a repack that runs
+	// before the drops leaves that space stranded inside pages the table still
+	// owns - 15 MB of it on the first corpus this ran against.
+	if reshaped {
+		if _, err := db.ExecContext(ctx, `VACUUM`); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -105,8 +119,9 @@ func migrate(db *sql.DB) error {
 // collapseOccurrences rewrites a per-version url_occurrences table into the
 // per-(url, package, file) form, interning file paths on the way.
 //
-// This is slow - it rewrites the largest table in the corpus and then vacuums -
-// but it runs once, and the table it replaces was over 80% of the database.
+// This is slow - it rewrites the largest table in the corpus - but it runs
+// once, and the table it replaces was over 80% of the database. The caller
+// vacuums once every change is in.
 func collapseOccurrences(ctx context.Context, db *sql.DB) error {
 	// A single connection, because the intermediate tables are TEMP and TEMP is
 	// per-connection: a pooled handle would hand later statements a session
@@ -188,9 +203,6 @@ func collapseOccurrences(ctx context.Context, db *sql.DB) error {
 		    WHERE u.host = hosts.host)`,
 
 		`PRAGMA foreign_keys = ON`,
-		// Without this the file keeps every page the old table occupied, which
-		// is the entire point of the exercise.
-		`VACUUM`,
 	}
 
 	for _, q := range steps {

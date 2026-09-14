@@ -87,7 +87,7 @@ Crawling the full transitive tree from `react`, sampling one version per minor l
 4,593 packages     61,140 versions     33.4 GB streamed
 7,239 hosts        5,395 registrable domains
 281,745 distinct URLs across 1.16M references
-max depth 32       249 MB corpus
+max depth 32       223 MB corpus
 ```
 
 Two packages dominated the cost, in opposite ways. `aws-sdk` bumps its minor on nearly every
