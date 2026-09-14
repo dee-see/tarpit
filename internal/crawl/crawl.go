@@ -289,7 +289,7 @@ func scanVersion(ctx context.Context, cfg Config, pv pendingVersion) (store.Vers
 	fromManifest := map[string]bool{}
 	for _, f := range manifest.URLs {
 		fromManifest[f.URL.Normalized] = true
-		result.Findings = append(result.Findings, toFinding(f.URL, f.Kind, f.Location, 0))
+		result.Findings = append(result.Findings, toFinding(f.URL, f.Location))
 	}
 
 	if manifest.TarballURL == "" {
@@ -314,7 +314,7 @@ func scanVersion(ctx context.Context, cfg Config, pv pendingVersion) (store.Vers
 		if f.Path == "package.json" && fromManifest[f.URL.Normalized] {
 			continue
 		}
-		result.Findings = append(result.Findings, toFinding(f.URL, f.Kind, f.Path, f.Line))
+		result.Findings = append(result.Findings, toFinding(f.URL, f.Path))
 	}
 	return result, manifest.Deps
 }
@@ -332,9 +332,7 @@ func scanTarball(ctx context.Context, cfg Config, manifest *registry.Manifest) (
 	counter := &countingWriter{}
 	stream := io.TeeReader(body, io.MultiWriter(hasher, counter))
 
-	findings, scanErr := tarball.Scan(stream, tarball.Options{
-		InstallScripts: manifest.InstallScriptFiles,
-	})
+	findings, scanErr := tarball.Scan(stream, tarball.Options{})
 
 	// Drain whatever the scanner did not consume so the hash and byte count
 	// describe the whole artifact, and the connection can be reused.
@@ -343,18 +341,14 @@ func scanTarball(ctx context.Context, cfg Config, manifest *registry.Manifest) (
 	return counter.n, hex.EncodeToString(hasher.Sum(nil)), findings, scanErr
 }
 
-func toFinding(u extract.URL, kind extract.SourceKind, location string, line int) store.Finding {
+func toFinding(u extract.URL, location string) store.Finding {
 	return store.Finding{
 		URL:               u.Normalized,
 		Scheme:            u.Scheme,
 		Host:              u.Host,
-		Port:              u.Port,
-		Path:              u.Path,
 		RegistrableDomain: u.RegistrableDomain,
 		HasPlaceholder:    u.HasPlaceholder,
-		SourceKind:        string(kind),
 		Location:          location,
-		Line:              line,
 	}
 }
 

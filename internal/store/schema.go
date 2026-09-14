@@ -42,13 +42,12 @@ CREATE TABLE IF NOT EXISTS dependencies (
 );
 CREATE INDEX IF NOT EXISTS idx_deps_name_kind ON dependencies(dep_name, kind);
 
+-- scheme, port and path are not stored: all three are url.Parse(url), and the
+-- parsed copy cost more than the string it was derived from.
 CREATE TABLE IF NOT EXISTS urls (
   id                 INTEGER PRIMARY KEY,
   url                TEXT NOT NULL UNIQUE,
-  scheme             TEXT NOT NULL,
   host               TEXT NOT NULL,
-  port               TEXT NOT NULL,
-  path               TEXT NOT NULL,
   registrable_domain TEXT NOT NULL,
   has_placeholder    INTEGER NOT NULL,
   first_seen_at      TEXT NOT NULL
@@ -56,16 +55,32 @@ CREATE TABLE IF NOT EXISTS urls (
 CREATE INDEX IF NOT EXISTS idx_urls_host ON urls(host);
 CREATE INDEX IF NOT EXISTS idx_urls_domain ON urls(registrable_domain);
 
-CREATE TABLE IF NOT EXISTS url_occurrences (
-  url_id      INTEGER NOT NULL REFERENCES urls(id),
-  version_id  INTEGER NOT NULL REFERENCES package_versions(id),
-  source_kind TEXT NOT NULL,
-  location    TEXT NOT NULL,
-  line        INTEGER NOT NULL,
-  UNIQUE(url_id, version_id, source_kind, location)
+-- File paths repeat relentlessly: 55k distinct paths backed 7.6M occurrence
+-- rows in the first full crawl, and every byte was paid for twice because the
+-- path sat inside the UNIQUE constraint as well as the row.
+CREATE TABLE IF NOT EXISTS locations (
+  id   INTEGER PRIMARY KEY,
+  path TEXT NOT NULL UNIQUE
 );
-CREATE INDEX IF NOT EXISTS idx_occ_version ON url_occurrences(version_id);
-CREATE INDEX IF NOT EXISTS idx_occ_kind ON url_occurrences(source_kind);
+
+-- One row per (url, package, file) rather than per version. A package's README
+-- cites the same URL in every version sampled, and storing that separately each
+-- time cost more than the rest of the corpus put together.
+--
+-- The version range survives the collapse because old versions are the premise
+-- of the tool: first_version_id and last_version_id bound where the reference
+-- was seen, ordered by publication date, and version_count says how many
+-- sampled versions in between carried it.
+CREATE TABLE IF NOT EXISTS url_occurrences (
+  url_id           INTEGER NOT NULL REFERENCES urls(id),
+  package_id       INTEGER NOT NULL REFERENCES packages(id),
+  location_id      INTEGER NOT NULL REFERENCES locations(id),
+  first_version_id INTEGER NOT NULL REFERENCES package_versions(id),
+  last_version_id  INTEGER NOT NULL REFERENCES package_versions(id),
+  version_count    INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(url_id, package_id, location_id)
+);
+CREATE INDEX IF NOT EXISTS idx_occ_package ON url_occurrences(package_id);
 
 -- Seam for the phase-two checker: last_checked_at lets it re-run cheaply over
 -- only what it has not seen since fingerprints last changed.

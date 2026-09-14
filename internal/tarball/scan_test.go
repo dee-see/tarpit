@@ -8,8 +8,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/dee-see/tarpit/internal/extract"
 )
 
 func makeArchive(t *testing.T, files map[string]string) []byte {
@@ -57,7 +55,7 @@ func makeArchive(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-func TestScanClassifiesAndLocates(t *testing.T) {
+func TestScanLocatesURLsByFile(t *testing.T) {
 	archive := makeArchive(t, map[string]string{
 		"package/scripts/install.js": "#!/usr/bin/env node\nconst url = 'https://bin.example.com/v1/node.tar.gz';\n",
 		"package/README.md":          "# thing\n\n[![ci](https://badge.example.org/x.svg)](https://ci.example.org/j)\n",
@@ -65,9 +63,7 @@ func TestScanClassifiesAndLocates(t *testing.T) {
 		"package/test/fixture.js":    "fetch('https://mock.example.io/data.json')\n",
 	})
 
-	findings, err := Scan(bytes.NewReader(archive), Options{
-		InstallScripts: map[string]bool{"scripts/install.js": true},
-	})
+	findings, err := Scan(bytes.NewReader(archive), Options{})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -77,32 +73,25 @@ func TestScanClassifiesAndLocates(t *testing.T) {
 		byHost[f.URL.Host] = f
 	}
 
-	want := map[string]struct {
-		kind extract.SourceKind
-		path string
-		line int
-	}{
-		"bin.example.com":   {extract.FileInstallScript, "scripts/install.js", 2},
-		"badge.example.org": {extract.FileDocs, "README.md", 3},
-		"ci.example.org":    {extract.FileDocs, "README.md", 3},
-		"build.example.net": {extract.FileBuildConfig, "binding.gyp", 1},
-		"mock.example.io":   {extract.FileTest, "test/fixture.js", 1},
+	// The file a URL was found in is the whole provenance record: it is what a
+	// takeover gets worked back from, and it is strictly more precise than the
+	// category it used to be mapped into.
+	want := map[string]string{
+		"bin.example.com":   "scripts/install.js",
+		"badge.example.org": "README.md",
+		"ci.example.org":    "README.md",
+		"build.example.net": "binding.gyp",
+		"mock.example.io":   "test/fixture.js",
 	}
 
-	for host, w := range want {
+	for host, path := range want {
 		got, ok := byHost[host]
 		if !ok {
 			t.Errorf("no finding for %s", host)
 			continue
 		}
-		if got.Kind != w.kind {
-			t.Errorf("%s: kind = %s, want %s", host, got.Kind, w.kind)
-		}
-		if got.Path != w.path {
-			t.Errorf("%s: path = %s, want %s", host, got.Path, w.path)
-		}
-		if got.Line != w.line {
-			t.Errorf("%s: line = %d, want %d", host, got.Line, w.line)
+		if got.Path != path {
+			t.Errorf("%s: path = %s, want %s", host, got.Path, path)
 		}
 	}
 	if len(findings) != len(want) {
@@ -145,8 +134,8 @@ func TestScanDedupesWithinFile(t *testing.T) {
 	if len(findings) != 1 {
 		t.Fatalf("got %d findings, want 1", len(findings))
 	}
-	if findings[0].Line != 1 {
-		t.Errorf("line = %d, want first occurrence (1)", findings[0].Line)
+	if findings[0].URL.Host != "repeat.example.com" {
+		t.Errorf("host = %s, want repeat.example.com", findings[0].URL.Host)
 	}
 }
 

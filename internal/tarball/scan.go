@@ -4,7 +4,6 @@ package tarball
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
@@ -24,8 +23,6 @@ const (
 	overlap = 8 << 10 // 8 KiB
 )
 
-var newline = []byte{'\n'}
-
 // ErrTooLarge reports that an archive exceeded the decompression ceiling. This
 // is a decompression-bomb guard, not a size filter: the default ceiling is far
 // above any legitimate package.
@@ -34,8 +31,6 @@ var ErrTooLarge = errors.New("archive exceeded decompression ceiling")
 // Finding is one URL sighting inside an archive.
 type Finding struct {
 	Path string
-	Line int
-	Kind extract.SourceKind
 	URL  extract.URL
 }
 
@@ -50,10 +45,6 @@ type Options struct {
 	// never need tuning; bounding crawl cost is the sampler's job, not this
 	// one's.
 	MaxDecompressed int64
-	// InstallScripts holds archive-relative paths referenced by the package's
-	// install hooks. Files in this set are classified FileInstallScript, the
-	// highest-severity file kind, because they run at install time.
-	InstallScripts map[string]bool
 }
 
 // Scan reads a gzipped tar archive from r and returns every distinct URL found,
@@ -112,11 +103,7 @@ func Scan(r io.Reader, opts Options) ([]Finding, error) {
 			continue
 		}
 
-		// Classify against the path as the package sees it, so that an install
-		// hook naming "scripts/install.js" matches.
-		kind := classify(strings.TrimPrefix(name, root+"/"), opts.InstallScripts)
-
-		found, err := scanFile(tr, name, kind)
+		found, err := scanFile(tr, name)
 		findings = append(findings, found...)
 		if err != nil {
 			if errors.Is(err, ErrTooLarge) {
@@ -137,11 +124,10 @@ func Scan(r io.Reader, opts Options) ([]Finding, error) {
 // scanFile reads one archive entry in bounded chunks. Binary files are scanned
 // too rather than skipped: a URL compiled into a checked-in binary is
 // strings-visible and just as claimable as one in source.
-func scanFile(r io.Reader, name string, kind extract.SourceKind) ([]Finding, error) {
+func scanFile(r io.Reader, name string) ([]Finding, error) {
 	var (
 		findings []Finding
 		seen     = map[string]bool{}
-		lineAt   = 1
 	)
 
 	// The window and carry buffers are allocated once and reused. Appending to
@@ -158,11 +144,9 @@ func scanFile(r io.Reader, name string, kind extract.SourceKind) ([]Finding, err
 		if n > 0 {
 			window = append(append(window[:0], carry...), buf[:n]...)
 			final := err == io.EOF
-			emit(window, name, kind, lineAt, final, seen, &findings)
+			emit(window, name, final, seen, &findings)
 
 			keep := min(len(window), overlap)
-			consumed := window[:len(window)-keep]
-			lineAt += bytes.Count(consumed, newline)
 			carry = append(carry[:0], window[len(window)-keep:]...)
 		}
 		if err == io.EOF {
@@ -174,7 +158,7 @@ func scanFile(r io.Reader, name string, kind extract.SourceKind) ([]Finding, err
 	}
 	// Flush whatever is left in the carry as a final window.
 	if len(carry) > 0 {
-		emit(carry, name, kind, lineAt, true, seen, &findings)
+		emit(carry, name, true, seen, &findings)
 	}
 	return findings, nil
 }
@@ -182,7 +166,7 @@ func scanFile(r io.Reader, name string, kind extract.SourceKind) ([]Finding, err
 // emit records matches from one window. Unless this is the final window,
 // matches touching the very end are dropped: they may be truncated mid-URL and
 // will be seen whole in the next window, which overlaps this one.
-func emit(window []byte, name string, kind extract.SourceKind, lineAt int, final bool, seen map[string]bool, out *[]Finding) {
+func emit(window []byte, name string, final bool, seen map[string]bool, out *[]Finding) {
 	for _, m := range extract.Find(window) {
 		if !final && m.Offset+len(m.Raw) == len(window) {
 			continue
@@ -192,49 +176,8 @@ func emit(window []byte, name string, kind extract.SourceKind, lineAt int, final
 			continue
 		}
 		seen[u.Normalized] = true
-		*out = append(*out, Finding{
-			Path: name,
-			Line: lineAt + bytes.Count(window[:m.Offset], newline),
-			Kind: kind,
-			URL:  u,
-		})
+		*out = append(*out, Finding{Path: name, URL: u})
 	}
-}
-
-// classify maps an archive path to a source kind. Install scripts are checked
-// first: they are the reason tarballs are downloaded at all, since the common
-// pattern "postinstall": "node scripts/install.js" hides the URL in here rather
-// than in the registry metadata.
-func classify(name string, installScripts map[string]bool) extract.SourceKind {
-	if installScripts[name] {
-		return extract.FileInstallScript
-	}
-
-	lower := strings.ToLower(name)
-	base := path.Base(lower)
-	ext := path.Ext(lower)
-
-	switch base {
-	case "binding.gyp", "makefile", "gnumakefile", "cmakelists.txt", "dockerfile", "webpack.config.js":
-		return extract.FileBuildConfig
-	}
-	switch ext {
-	case ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd", ".gyp", ".gypi", ".mk", ".cmake":
-		return extract.FileBuildConfig
-	case ".md", ".markdown", ".rst", ".txt", ".adoc":
-		return extract.FileDocs
-	}
-	for seg := range strings.SplitSeq(lower, "/") {
-		switch seg {
-		case "test", "tests", "spec", "specs", "__tests__", "fixtures", "e2e":
-			return extract.FileTest
-		case ".github", ".circleci", ".travis.yml", "ci":
-			return extract.FileBuildConfig
-		case "doc", "docs", "examples", "example":
-			return extract.FileDocs
-		}
-	}
-	return extract.FileSource
 }
 
 // normalizePath cleans an archive entry name into a plain relative path.

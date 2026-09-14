@@ -2,10 +2,14 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"unicode/utf8"
+
+	_ "modernc.org/sqlite"
 )
 
 // Binaries are scanned rather than skipped, so URLs and snippets can carry
@@ -30,8 +34,8 @@ func TestSaveVersionSanitizesInvalidUTF8(t *testing.T) {
 		Version: "1.0.0",
 		Findings: []Finding{{
 			URL: bad, Scheme: "https", Host: "example.com",
-			RegistrableDomain: "example.com", SourceKind: "file_source",
-			Location: "a\xff.js",
+			RegistrableDomain: "example.com",
+			Location:          "a\xff.js",
 		}},
 	}); err != nil {
 		t.Fatal(err)
@@ -39,8 +43,10 @@ func TestSaveVersionSanitizesInvalidUTF8(t *testing.T) {
 
 	var url, location string
 	if err := db.DB().QueryRow(`
-		SELECT u.url, o.location
-		FROM url_occurrences o JOIN urls u ON u.id = o.url_id`).
+		SELECT u.url, l.path
+		FROM url_occurrences o
+		JOIN urls u      ON u.id = o.url_id
+		JOIN locations l ON l.id = o.location_id`).
 		Scan(&url, &location); err != nil {
 		t.Fatal(err)
 	}
@@ -70,11 +76,11 @@ func TestHostsTableSkipsUnresolvableHosts(t *testing.T) {
 	}
 
 	findings := []Finding{
-		{URL: "https://www", Scheme: "https", Host: "www", SourceKind: "file_source", Location: "a.js"},
+		{URL: "https://www", Scheme: "https", Host: "www", Location: "a.js"},
 		{URL: "https://real.example.com", Scheme: "https", Host: "real.example.com",
-			RegistrableDomain: "example.com", SourceKind: "file_source", Location: "b.js"},
+			RegistrableDomain: "example.com", Location: "b.js"},
 		{URL: "s3://my-release-bucket", Scheme: "s3", Host: "my-release-bucket",
-			SourceKind: "metadata_binary", Location: "binary.host"},
+			Location: "binary.host"},
 	}
 	if err := db.SaveVersion(ctx, pkgID, VersionResult{Version: "1.0.0", Findings: findings}); err != nil {
 		t.Fatal(err)
@@ -189,5 +195,129 @@ func TestAttemptsCountFailuresNotClaims(t *testing.T) {
 	}
 	if got, st := attempts(), status(); got != 0 || st != "pending" {
 		t.Errorf("after reseed attempts=%d status=%q, want 0/pending", got, st)
+	}
+}
+
+// A corpus written before the collapse stores one row per version, with the
+// file path and a source kind repeated in every one. Migrating must preserve
+// which package cited which URL in which file, and must reconstruct the version
+// span that the per-version rows made implicit.
+func TestMigrateCollapsesLegacyOccurrences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`
+		CREATE TABLE packages (
+		  id INTEGER PRIMARY KEY, ecosystem TEXT NOT NULL, name TEXT NOT NULL,
+		  first_seen_at TEXT NOT NULL, UNIQUE(ecosystem, name));
+		CREATE TABLE package_versions (
+		  id INTEGER PRIMARY KEY, package_id INTEGER NOT NULL, version TEXT NOT NULL,
+		  published_at TEXT, tarball_url TEXT, tarball_bytes INTEGER,
+		  tarball_sha256 TEXT, extract_status TEXT NOT NULL DEFAULT 'pending',
+		  extract_error TEXT, extracted_at TEXT, UNIQUE(package_id, version));
+		CREATE TABLE urls (
+		  id INTEGER PRIMARY KEY, url TEXT NOT NULL UNIQUE, scheme TEXT NOT NULL,
+		  host TEXT NOT NULL, port TEXT NOT NULL, path TEXT NOT NULL,
+		  registrable_domain TEXT NOT NULL, has_placeholder INTEGER NOT NULL,
+		  first_seen_at TEXT NOT NULL);
+		CREATE TABLE url_occurrences (
+		  url_id INTEGER NOT NULL, version_id INTEGER NOT NULL,
+		  source_kind TEXT NOT NULL, location TEXT NOT NULL, line INTEGER NOT NULL,
+		  UNIQUE(url_id, version_id, source_kind, location));
+		CREATE TABLE hosts (
+		  host TEXT PRIMARY KEY, registrable_domain TEXT NOT NULL,
+		  first_seen_at TEXT NOT NULL, occurrence_count INTEGER NOT NULL DEFAULT 0,
+		  last_checked_at TEXT);
+
+		INSERT INTO packages VALUES (1, 'npm', 'thing', '2020-01-01T00:00:00Z');
+		-- Deliberately out of publication order, and with one version whose
+		-- date is unknown, because both occur in the real corpus.
+		INSERT INTO package_versions (id, package_id, version, published_at) VALUES
+		  (1, 1, '2.0.0', '2022-01-01T00:00:00Z'),
+		  (2, 1, '1.0.0', '2020-01-01T00:00:00Z'),
+		  (3, 1, '1.5.0', '2021-01-01T00:00:00Z'),
+		  (4, 1, '0.9.0', NULL);
+		INSERT INTO urls VALUES
+		  (1, 'https://lapsed.example.com/b.tgz', 'https', 'lapsed.example.com', '',
+		   '/b.tgz', 'example.com', 0, '2020-01-01T00:00:00Z');
+		INSERT INTO hosts VALUES ('lapsed.example.com', 'example.com',
+		   '2020-01-01T00:00:00Z', 99, NULL);
+
+		-- Same URL, same file, four versions: one row after the collapse.
+		INSERT INTO url_occurrences VALUES
+		  (1, 1, 'file_source', 'scripts/install.js', 3),
+		  (1, 2, 'file_source', 'scripts/install.js', 3),
+		  (1, 3, 'file_source', 'scripts/install.js', 4),
+		  (1, 4, 'file_source', 'scripts/install.js', 1),
+		-- Same URL and package but a different file: stays separate.
+		  (1, 1, 'file_docs', 'README.md', 12);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	legacy.Close()
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer db.Close()
+
+	type row struct {
+		location    string
+		first, last string
+		count       int
+	}
+	var got []row
+	rows, err := db.DB().Query(`
+		SELECT l.path, fv.version, lv.version, o.version_count
+		FROM url_occurrences o
+		JOIN locations l         ON l.id = o.location_id
+		JOIN package_versions fv ON fv.id = o.first_version_id
+		JOIN package_versions lv ON lv.id = o.last_version_id
+		ORDER BY l.path`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.location, &r.first, &r.last, &r.count); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, r)
+	}
+
+	want := []row{
+		{"README.md", "2.0.0", "2.0.0", 1},
+		// 0.9.0 has no publication date, so it sorts first: the honest answer
+		// when nothing is known about when it was live.
+		{"scripts/install.js", "0.9.0", "2.0.0", 4},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("collapsed rows = %+v, want %+v", got, want)
+	}
+
+	// occurrence_count totalled raw sightings before; it now totals references.
+	var n int
+	if err := db.DB().QueryRow(
+		`SELECT occurrence_count FROM hosts WHERE host = 'lapsed.example.com'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("occurrence_count = %d, want 2 recomputed references", n)
+	}
+
+	// The parsed-copy columns are gone.
+	cols, err := tableColumns(db.DB(), "urls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []string{"scheme", "port", "path"} {
+		if cols[c] {
+			t.Errorf("urls.%s survived the migration", c)
+		}
 	}
 }

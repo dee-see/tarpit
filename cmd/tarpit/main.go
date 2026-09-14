@@ -176,19 +176,13 @@ func runStatus(ctx context.Context, args []string) error {
 	fmt.Printf("corpus:    %s\n", *dbPath)
 	fmt.Printf("packages:  %d\n", s.Packages)
 	fmt.Printf("versions:  %d scanned, %d failed\n", s.VersionsDone, s.VersionsFail)
-	fmt.Printf("urls:      %d distinct across %d occurrence(s)\n", s.URLs, s.Occurrences)
+	fmt.Printf("urls:      %d distinct across %d reference(s)\n", s.URLs, s.Occurrences)
 	fmt.Printf("hosts:     %d distinct, %d registrable domain(s)\n", s.Hosts, s.Domains)
 
 	if len(s.FrontierByStatus) > 0 {
 		fmt.Printf("\nfrontier:\n")
 		for _, k := range sortedKeys(s.FrontierByStatus) {
 			fmt.Printf("  %-10s %d\n", k, s.FrontierByStatus[k])
-		}
-	}
-	if len(s.ByKind) > 0 {
-		fmt.Printf("\noccurrences by source:\n")
-		for _, k := range sortedKeys(s.ByKind) {
-			fmt.Printf("  %-22s %d\n", k, s.ByKind[k])
 		}
 	}
 	return nil

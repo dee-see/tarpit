@@ -2,9 +2,9 @@
 // the takeover checker can key on later.
 //
 // The bias here is recall over precision: this phase builds a corpus, and
-// deciding which URLs are interesting is deliberately a later concern. What we
-// do insist on is provenance — every URL is recorded with where it came from,
-// because SourceKind is what makes the corpus rankable in phase two.
+// deciding which URLs are interesting is deliberately a later concern. Every
+// URL is recorded with the file or manifest field it came from, which is the
+// breadcrumb for working an eventual takeover back to something exploitable.
 package extract
 
 import (
@@ -12,25 +12,6 @@ import (
 	"strings"
 
 	"golang.org/x/net/publicsuffix"
-)
-
-// SourceKind records where a URL was found. The metadata_* kinds come from the
-// registry document; the file_* kinds come from inside the tarball.
-type SourceKind string
-
-const (
-	MetadataScript    SourceKind = "metadata_script"
-	MetadataBinary    SourceKind = "metadata_binary"
-	MetadataDepSpec   SourceKind = "metadata_dep_spec"
-	MetadataRepo      SourceKind = "metadata_repo"
-	FileInstallScript SourceKind = "file_install_script"
-	FileBuildConfig   SourceKind = "file_build_config"
-	FileSource        SourceKind = "file_source"
-	FileDocs          SourceKind = "file_docs"
-	FileTest          SourceKind = "file_test"
-	// MetadataOther covers URLs found by sweeping the raw version manifest
-	// that no typed field claimed - custom fields, publisher tooling residue.
-	MetadataOther SourceKind = "metadata_other"
 )
 
 // urlChar is the set of bytes allowed to continue a URL. Braces and '$' are

@@ -276,26 +276,28 @@ func TestRerunWithDevIsIncremental(t *testing.T) {
 	}
 }
 
-func TestCrawlClassifiesInstallScriptURLs(t *testing.T) {
+// A URL that only exists inside a file the manifest names is the reason
+// tarballs are streamed at all: the manifest proves a fetch happens but hides
+// where. What is recorded is the file it was found in, which is what an
+// eventual takeover gets worked back from.
+func TestCrawlRecordsURLsFoundOnlyInsideTarballFiles(t *testing.T) {
 	fr := newFakeRegistry(t, fixture())
 	dbPath := path.Join(t.TempDir(), "corpus.db")
 	runCrawl(t, fr, dbPath, []string{"runtime"})
 
-	kinds := query[string](t, dbPath, `
-		SELECT o.source_kind FROM url_occurrences o
-		JOIN urls u ON u.id = o.url_id
-		WHERE u.host = 'bin.lapsed-example.com'`)
-	if fmt.Sprint(kinds) != "[file_install_script]" {
-		t.Errorf("kind = %v, want [file_install_script]: a URL inside a file named by "+
-			"postinstall is install-time code", kinds)
+	where := func(host string) []string {
+		return query[string](t, dbPath, `
+			SELECT l.path FROM url_occurrences o
+			JOIN urls u      ON u.id = o.url_id
+			JOIN locations l ON l.id = o.location_id
+			WHERE u.host = ? ORDER BY 1`, host)
 	}
 
-	badge := query[string](t, dbPath, `
-		SELECT o.source_kind FROM url_occurrences o
-		JOIN urls u ON u.id = o.url_id
-		WHERE u.host = 'badge.example.org'`)
-	if fmt.Sprint(badge) != "[file_docs]" {
-		t.Errorf("README URL kind = %v, want [file_docs]", badge)
+	if got := where("bin.lapsed-example.com"); fmt.Sprint(got) != "[scripts/install.js]" {
+		t.Errorf("location = %v, want [scripts/install.js]", got)
+	}
+	if got := where("badge.example.org"); fmt.Sprint(got) != "[README.md]" {
+		t.Errorf("README URL location = %v, want [README.md]", got)
 	}
 }
 
@@ -357,20 +359,22 @@ func TestRootPackageJSONDropsOnlyExactDuplicates(t *testing.T) {
 	dbPath := path.Join(t.TempDir(), "corpus.db")
 	runCrawl(t, fr, dbPath, []string{"runtime"})
 
-	kindsFor := func(host string) []string {
+	locationsFor := func(host string) []string {
 		return query[string](t, dbPath, `
-			SELECT o.source_kind || '@' || o.location
-			FROM url_occurrences o JOIN urls u ON u.id = o.url_id
+			SELECT l.path
+			FROM url_occurrences o
+			JOIN urls u      ON u.id = o.url_id
+			JOIN locations l ON l.id = o.location_id
 			WHERE u.host = ? ORDER BY 1`, host)
 	}
 
-	if got := kindsFor("dup.example.com"); fmt.Sprint(got) != "[metadata_repo@homepage]" {
+	if got := locationsFor("dup.example.com"); fmt.Sprint(got) != "[homepage]" {
 		t.Errorf("duplicate = %v, want only the manifest sighting", got)
 	}
-	if got := kindsFor("vendored.example.com"); fmt.Sprint(got) != "[file_source@nested/package.json]" {
+	if got := locationsFor("vendored.example.com"); fmt.Sprint(got) != "[nested/package.json]" {
 		t.Errorf("nested package.json = %v, want kept: it is a different document", got)
 	}
-	got := kindsFor("github.com")
+	got := locationsFor("github.com")
 	if len(got) != 2 {
 		t.Errorf("github.com sightings = %v, want both the manifest's git+https form "+
 			"and the tarball's plain https form", got)

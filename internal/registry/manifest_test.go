@@ -3,10 +3,7 @@ package registry
 import (
 	"encoding/json"
 	"reflect"
-	"sort"
 	"testing"
-
-	"github.com/dee-see/tarpit/internal/extract"
 )
 
 func parse(t *testing.T, raw string) *Manifest {
@@ -18,7 +15,7 @@ func parse(t *testing.T, raw string) *Manifest {
 	return m
 }
 
-func TestParseManifestClassifiesURLs(t *testing.T) {
+func TestParseManifestLocatesURLs(t *testing.T) {
 	m := parse(t, `{
 		"name": "thing",
 		"version": "1.2.3",
@@ -40,22 +37,22 @@ func TestParseManifestClassifiesURLs(t *testing.T) {
 		t.Errorf("TarballURL = %q", m.TarballURL)
 	}
 
-	got := map[string]extract.SourceKind{}
+	got := map[string]string{}
 	for _, f := range m.URLs {
-		got[f.URL.Normalized] = f.Kind
+		got[f.URL.Normalized] = f.Location
 	}
 
-	want := map[string]extract.SourceKind{
-		"https://bin.example.com/v1.tar.gz":        extract.MetadataScript,
-		"https://docs.example.org/reporter":        extract.MetadataOther,
-		"https://thing-binaries.s3.amazonaws.com":  extract.MetadataBinary,
-		"git+https://git.example.net/legacy.git":   extract.MetadataDepSpec,
-		"git+https://github.com/example/thing.git": extract.MetadataRepo,
-		"https://thing.example.io":                 extract.MetadataRepo,
+	want := map[string]string{
+		"https://bin.example.com/v1.tar.gz":        "scripts.postinstall",
+		"https://docs.example.org/reporter":        "scripts.test",
+		"https://thing-binaries.s3.amazonaws.com":  "binary.host",
+		"git+https://git.example.net/legacy.git":   "dependencies.legacy",
+		"git+https://github.com/example/thing.git": "repository",
+		"https://thing.example.io":                 "homepage",
 	}
-	for u, kind := range want {
-		if got[u] != kind {
-			t.Errorf("%s: kind = %q, want %q", u, got[u], kind)
+	for u, loc := range want {
+		if got[u] != loc {
+			t.Errorf("%s: location = %q, want %q", u, got[u], loc)
 		}
 	}
 
@@ -108,37 +105,5 @@ func TestParseManifestToleratesMalformedFields(t *testing.T) {
 	}
 	if len(m.Deps) != 1 || m.Deps[0].Name != "ok" {
 		t.Errorf("Deps = %v, want only the well-formed entry", m.Deps)
-	}
-}
-
-func TestScriptFileRefs(t *testing.T) {
-	tests := []struct {
-		in   string
-		want []string
-	}{
-		{"node scripts/install.js", []string{"scripts/install.js"}},
-		{"node ./install.js && sh ./bin/setup.sh", []string{"install.js", "bin/setup.sh"}},
-		{"curl -sL https://x.example.com/a.sh | sh", nil},
-		{"node-gyp rebuild", nil},
-		{`node "scripts/post install.js"`, []string{"install.js"}},
-	}
-	for _, tc := range tests {
-		got := scriptFileRefs(tc.in)
-		sort.Strings(got)
-		want := append([]string(nil), tc.want...)
-		sort.Strings(want)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("scriptFileRefs(%q) = %v, want %v", tc.in, got, want)
-		}
-	}
-}
-
-func TestInstallScriptFilesFeedTheScanner(t *testing.T) {
-	m := parse(t, `{"version":"1.0.0","scripts":{"postinstall":"node scripts/install.js","build":"node scripts/build.js"}}`)
-	if !m.InstallScriptFiles["scripts/install.js"] {
-		t.Error("install-time script file not recorded")
-	}
-	if m.InstallScriptFiles["scripts/build.js"] {
-		t.Error("build script is not install-time and must not be flagged as such")
 	}
 }
