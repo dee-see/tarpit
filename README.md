@@ -36,7 +36,7 @@ Crawl a package and its direct dependencies:
 
 ```console
 $ tarpit crawl sqlite3 --depth 1 --sample major
-crawling [sqlite3] (edges: [runtime optional], sample: major, db: corpus.db)
+crawling [sqlite3] (edges: [runtime optional], dev: seeds, sample: major, db: corpus.db)
 sqlite3: 5 version(s) scanned, 0 skipped, 5132 URL(s), depth 0
 ```
 
@@ -68,7 +68,7 @@ from an install hook is a question for the package, answered by reading it.
 |---|---|
 | `--depth N` | Hops from the seed. `0` is the seeds alone, `-1` (default) is unlimited. |
 | `--sample minor\|major\|all` | Version density. Default `minor`: the highest patch of each release line. |
-| `--dev` | Also follow devDependencies. Incremental - see below. |
+| `--dev seeds\|all\|none` | Which devDependency edges to follow. Default `seeds`. Incremental - see below. |
 | `--no-optional`, `--peer` | Adjust which dependency kinds are followed. |
 | `--prerelease` | Include `-alpha` / `-rc` versions, which are skipped by default. |
 | `--rate N` | Registry requests per second. Default 10. |
@@ -125,16 +125,30 @@ every version sampled, and storing that separately each time cost more than the 
 corpus put together. The version span survives the collapse — `first_version_id`,
 `last_version_id` and `version_count` — because old versions are the entire premise.
 
+**devDependencies are followed from the seeds and nowhere else.** npm does not install the
+devDependencies *of your dependencies* - they install only when you are developing that package
+itself. So a lapsed domain on a transitive dev dep is a risk to that package's maintainers and
+its CI, not an install-time vector for anyone downstream. A seed's own dev deps are the opposite:
+they install on your machine and in your CI, with whatever credentials those have, which is the
+strongest install-time story in the corpus. `--dev seeds` is the default for that reason.
+
+`--dev all` follows them at every depth. On the react corpus that is 3,460 package names the
+crawl has never seen from the first hop alone - a 75% increase - each arriving with its own dev
+tree, against 17.9 hours already spent reaching 4,593 packages. `--dev none` skips them entirely.
+
 **Every dependency kind is recorded, even the ones being ignored.** `--dev` controls what gets
 *enqueued*, never what gets *stored*. So this:
 
 ```console
-$ tarpit crawl react              # runtime + optional edges
-$ tarpit crawl react --dev        # now also devDependencies
+$ tarpit crawl react              # runtime + optional, plus the seed's dev deps
+$ tarpit crawl react --dev all    # now devDependencies at every depth
 ```
 
 ...costs no re-crawling. The second command finds newly-reachable packages with a query over
 edges the first one already wrote, and skips every version already on disk.
+
+"Seed" means any package at depth 0 in the frontier, which is every package ever named on a
+`crawl` command line, not just this run's. Naming one pins it there permanently.
 
 ## Status
 

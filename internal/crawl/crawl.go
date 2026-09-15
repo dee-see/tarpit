@@ -27,6 +27,13 @@ type Config struct {
 	Store       *store.Store
 	Sample      sample.Options
 	FollowKinds []string
+	// SeedKinds lists dependency kinds followed only from packages at depth 0.
+	// npm does not install the devDependencies of your dependencies, so a dev
+	// edge below the seeds is a risk to that package's own maintainers rather
+	// than an install-time vector for anyone who depends on it. A seed's own
+	// dev deps do install, on developer machines and in CI, which is the case
+	// worth following.
+	SeedKinds []string
 	// MaxDepth counts hops from the seed: 0 crawls the seeds alone, 1 adds
 	// their direct dependencies. Negative means unlimited.
 	MaxDepth    int
@@ -63,10 +70,14 @@ func Run(ctx context.Context, cfg Config, seeds []string) (Result, error) {
 	// Enqueue anything reachable through the currently-followed dependency
 	// kinds that earlier runs stored but did not follow. This is what makes
 	// turning on --dev incremental rather than a re-crawl.
-	if n, err := cfg.Store.BackfillDeps(ctx, cfg.Ecosystem, cfg.FollowKinds); err != nil {
+	if n, err := cfg.Store.BackfillDeps(ctx, cfg.Ecosystem, cfg.FollowKinds, cfg.SeedKinds); err != nil {
 		return result, err
 	} else if n > 0 {
-		cfg.Logf("backfilled %d package(s) newly reachable via %v edges", n, cfg.FollowKinds)
+		via := fmt.Sprintf("via %v edges", cfg.FollowKinds)
+		if len(cfg.SeedKinds) > 0 {
+			via += fmt.Sprintf(", plus %v edges leaving the seeds", cfg.SeedKinds)
+		}
+		cfg.Logf("backfilled %d package(s) newly reachable %s", n, via)
 	}
 
 	var (
@@ -221,6 +232,11 @@ func processPackage(ctx context.Context, cfg Config, item store.FrontierItem) (p
 	follow := map[string]bool{}
 	for _, k := range cfg.FollowKinds {
 		follow[k] = true
+	}
+	if item.Depth == 0 {
+		for _, k := range cfg.SeedKinds {
+			follow[k] = true
+		}
 	}
 	nextHop := map[string]bool{}
 

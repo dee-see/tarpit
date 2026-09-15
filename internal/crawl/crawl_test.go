@@ -126,10 +126,17 @@ func makeTarball(t *testing.T, files map[string]string) []byte {
 
 func runCrawl(t *testing.T, fr *fakeRegistry, dbPath string, kinds []string) Result {
 	t.Helper()
-	return runCrawlDepth(t, fr, dbPath, kinds, "root", -1)
+	return runCrawlCfg(t, fr, dbPath, Config{FollowKinds: kinds}, "root", -1)
 }
 
 func runCrawlDepth(t *testing.T, fr *fakeRegistry, dbPath string, kinds []string, seed string, depth int) Result {
+	t.Helper()
+	return runCrawlCfg(t, fr, dbPath, Config{FollowKinds: kinds}, seed, depth)
+}
+
+// runCrawlCfg takes the kind fields off a Config so a test can set SeedKinds;
+// everything else is filled in here.
+func runCrawlCfg(t *testing.T, fr *fakeRegistry, dbPath string, kinds Config, seed string, depth int) Result {
 	t.Helper()
 	db, err := store.Open(dbPath)
 	if err != nil {
@@ -145,7 +152,8 @@ func runCrawlDepth(t *testing.T, fr *fakeRegistry, dbPath string, kinds []string
 		Client:      client,
 		Store:       db,
 		Sample:      sample.Options{Strategy: sample.Minor},
-		FollowKinds: kinds,
+		FollowKinds: kinds.FollowKinds,
+		SeedKinds:   kinds.SeedKinds,
 		MaxDepth:    depth,
 		Concurrency: 2,
 		MaxAttempts: 2,
@@ -273,6 +281,97 @@ func TestRerunWithDevIsIncremental(t *testing.T) {
 	hosts := query[string](t, dbPath, `SELECT host FROM urls WHERE host = 'devonly.example.net'`)
 	if len(hosts) != 1 {
 		t.Error("URL reachable only through a dev edge was not extracted")
+	}
+}
+
+// devTree has a dev edge at each of the two depths that matter: one leaving
+// the seed, which npm would install on the seed's own maintainers' machines,
+// and one leaving a runtime dependency, which npm installs for nobody.
+func devTree() map[string]fakePkg {
+	return map[string]fakePkg{
+		"root": {
+			deps:    map[string]string{"runtimedep": "^1.0.0"},
+			devDeps: map[string]string{"seeddev": "^1.0.0"},
+		},
+		"runtimedep": {
+			devDeps: map[string]string{"deepdev": "^1.0.0"},
+			files:   map[string]string{"index.js": "// nothing here\n"},
+		},
+		"seeddev": {files: map[string]string{"index.js": "fetch('https://seeddev.example.net/a')\n"}},
+		"deepdev": {files: map[string]string{"index.js": "fetch('https://deepdev.example.net/a')\n"}},
+	}
+}
+
+// TestDevEdgesFollowedFromSeedsOnly is the whole point of SeedKinds: a dev edge
+// one hop below the seed is a risk to that package's maintainers, not an
+// install-time vector for anyone downstream, and following it is what makes the
+// dev closure outgrow the runtime one.
+func TestDevEdgesFollowedFromSeedsOnly(t *testing.T) {
+	fr := newFakeRegistry(t, devTree())
+	dbPath := path.Join(t.TempDir(), "corpus.db")
+
+	runCrawlCfg(t, fr, dbPath, Config{
+		FollowKinds: []string{"runtime"},
+		SeedKinds:   []string{"dev"},
+	}, "root", -1)
+
+	scanned := query[string](t, dbPath, `SELECT name FROM packages ORDER BY name`)
+	want := []string{"root", "runtimedep", "seeddev"}
+	if fmt.Sprint(scanned) != fmt.Sprint(want) {
+		t.Errorf("scanned packages = %v, want %v (deepdev is a dev dep of a dependency)", scanned, want)
+	}
+	// Unfollowed is not unrecorded: the edge stays queryable, which is what
+	// keeps -dev=all a backfill rather than a re-crawl.
+	edges := query[string](t, dbPath,
+		`SELECT dep_name FROM dependencies WHERE kind = 'dev' ORDER BY dep_name`)
+	if fmt.Sprint(edges) != "[deepdev seeddev]" {
+		t.Errorf("dev edges = %v, want both stored", edges)
+	}
+	hosts := query[string](t, dbPath, `SELECT host FROM urls WHERE host = 'deepdev.example.net'`)
+	if len(hosts) != 0 {
+		t.Error("deepdev was scanned; its dev edge leaves a package at depth 1")
+	}
+}
+
+// The contrast case, so the two settings are pinned against each other rather
+// than each against itself.
+func TestDevAllFollowsEveryDepth(t *testing.T) {
+	fr := newFakeRegistry(t, devTree())
+	dbPath := path.Join(t.TempDir(), "corpus.db")
+
+	runCrawlCfg(t, fr, dbPath, Config{FollowKinds: []string{"runtime", "dev"}}, "root", -1)
+
+	scanned := query[string](t, dbPath, `SELECT name FROM packages ORDER BY name`)
+	want := []string{"deepdev", "root", "runtimedep", "seeddev"}
+	if fmt.Sprint(scanned) != fmt.Sprint(want) {
+		t.Errorf("scanned packages = %v, want %v", scanned, want)
+	}
+}
+
+// BackfillDeps has to apply the same depth rule as the crawl loop. If it does
+// not, it enqueues deep dev packages the loop then declines to follow and the
+// frontier fills with work no run will ever do.
+func TestBackfillHonoursTheSeedOnlyRule(t *testing.T) {
+	fr := newFakeRegistry(t, devTree())
+	dbPath := path.Join(t.TempDir(), "corpus.db")
+
+	runCrawlCfg(t, fr, dbPath, Config{FollowKinds: []string{"runtime"}}, "root", -1)
+
+	// Turning dev on later must reach seeddev through the stored edges alone.
+	runCrawlCfg(t, fr, dbPath, Config{
+		FollowKinds: []string{"runtime"},
+		SeedKinds:   []string{"dev"},
+	}, "root", -1)
+
+	scanned := query[string](t, dbPath, `SELECT name FROM packages ORDER BY name`)
+	want := []string{"root", "runtimedep", "seeddev"}
+	if fmt.Sprint(scanned) != fmt.Sprint(want) {
+		t.Errorf("scanned packages = %v, want %v", scanned, want)
+	}
+	queued := query[string](t, dbPath,
+		`SELECT name FROM frontier WHERE name = 'deepdev'`)
+	if len(queued) != 0 {
+		t.Error("backfill enqueued deepdev, which the crawl loop will never follow")
 	}
 }
 

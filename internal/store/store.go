@@ -514,19 +514,37 @@ func (s *Store) ReleaseClaimed(ctx context.Context) (int, error) {
 }
 
 // BackfillDeps enqueues packages reachable through dependency edges of the
-// given kinds that are not yet known.
+// given kinds that are not yet known. Kinds in seedKinds count only on edges
+// leaving a package at depth 0, mirroring the crawl loop's own rule.
 //
-// This is what makes `crawl <pkg> --dev` incremental: because every dependency
-// kind was stored on the first pass, turning on --dev is a query over rows we
-// already have. Nothing already scanned is fetched again.
-func (s *Store) BackfillDeps(ctx context.Context, ecosystem string, kinds []string) (int, error) {
-	if len(kinds) == 0 {
+// This is what makes `crawl <pkg> --dev all` incremental: because every
+// dependency kind was stored on the first pass, widening --dev is a query over
+// rows we already have. Nothing already scanned is fetched again.
+//
+// Without the seedKinds half, backfill would enqueue deep dev packages that
+// the crawl loop then declines to follow, and the frontier would fill with
+// work no run will ever do.
+func (s *Store) BackfillDeps(ctx context.Context, ecosystem string, kinds, seedKinds []string) (int, error) {
+	if len(kinds) == 0 && len(seedKinds) == 0 {
 		return 0, nil
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",")
 	args := []any{ecosystem}
-	for _, k := range kinds {
-		args = append(args, k)
+	// A package's frontier depth is what makes it a seed, and Seed() pins that
+	// at 0 permanently, so "at depth 0" spans every run that ever named it.
+	// A missing frontier row is not a seed, hence the explicit `pf.depth = 0`
+	// rather than the COALESCE the depth arithmetic uses.
+	var clauses []string
+	if len(kinds) > 0 {
+		clauses = append(clauses, "d.kind IN ("+placeholders(len(kinds))+")")
+		for _, k := range kinds {
+			args = append(args, k)
+		}
+	}
+	if len(seedKinds) > 0 {
+		clauses = append(clauses, "(pf.depth = 0 AND d.kind IN ("+placeholders(len(seedKinds))+"))")
+		for _, k := range seedKinds {
+			args = append(args, k)
+		}
 	}
 
 	var n int64
@@ -538,7 +556,7 @@ func (s *Store) BackfillDeps(ctx context.Context, ecosystem string, kinds []stri
 			JOIN package_versions v ON v.id = d.version_id
 			JOIN packages p ON p.id = v.package_id AND p.ecosystem = ?1
 			LEFT JOIN frontier pf ON pf.ecosystem = p.ecosystem AND pf.name = p.name
-			WHERE d.kind IN (`+placeholders+`)
+			WHERE (`+strings.Join(clauses, " OR ")+`)
 			  AND NOT EXISTS (
 				SELECT 1 FROM packages ex WHERE ex.ecosystem = ?1 AND ex.name = d.dep_name
 			  )
@@ -550,6 +568,11 @@ func (s *Store) BackfillDeps(ctx context.Context, ecosystem string, kinds []stri
 		return nil
 	})
 	return int(n), err
+}
+
+// placeholders returns n comma-separated bind markers for an IN clause.
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
 // ---------------------------------------------------------------- runs
