@@ -16,8 +16,8 @@ version history instead.
 
 `tarpit` crawls a package ecosystem from a seed package, samples each package's version history,
 and extracts every URL it can find — from both the registry metadata and the contents of every
-sampled tarball — into a local SQLite corpus that maps each URL back to the exact package,
-version, and file it came from.
+sampled tarball — into a local SQLite corpus that records which package cited which URL, in which
+file, across which span of versions.
 
 Checking whether those URLs are claimable is a **separate command**, by design. Extraction is
 slow, network-heavy, and produces immutable results; takeover fingerprints are cheap and change
@@ -40,22 +40,27 @@ crawling [sqlite3] (edges: [runtime optional], sample: major, db: corpus.db)
 sqlite3: 5 version(s) scanned, 0 skipped, 5132 URL(s), depth 0
 ```
 
-Then look at what it found, worst first:
+Then ask what a given host is doing in the corpus:
 
 ```sql
-SELECT o.source_kind, p.name || '@' || v.version, u.host, o.location
+SELECT p.name, l.path, fv.version || '..' || lv.version AS versions, o.version_count
 FROM url_occurrences o
-JOIN urls u             ON u.id = o.url_id
-JOIN package_versions v ON v.id = o.version_id
-JOIN packages p         ON p.id = v.package_id
-WHERE o.source_kind IN ('metadata_script', 'file_install_script', 'metadata_binary');
+JOIN urls u              ON u.id  = o.url_id
+JOIN packages p          ON p.id  = o.package_id
+JOIN locations l         ON l.id  = o.location_id
+JOIN package_versions fv ON fv.id = o.first_version_id
+JOIN package_versions lv ON lv.id = o.last_version_id
+WHERE u.host = 'd332vdhbectycy.cloudfront.net';
 ```
 
 ```
-metadata_binary | sqlite3@2.2.7  | mapbox-node-binary.s3.amazonaws.com | binary.host
-metadata_binary | sqlite3@3.1.13 | mapbox-node-binary.s3.amazonaws.com | binary.host
-metadata_binary | sqlite3@4.2.0  | mapbox-node-binary.s3.amazonaws.com | binary.host
+aws-crt | README.md        | 1.9.8..1.33.1 | 26
+aws-crt | scripts/build.js | 1.9.8..1.33.1 | 26
 ```
+
+One row says the interesting thing: across 26 sampled versions spanning `1.9.8` to `1.33.1`,
+`aws-crt` reaches that CloudFront distribution from `scripts/build.js`. Whether that is reachable
+from an install hook is a question for the package, answered by reading it.
 
 ### Notable flags
 
@@ -81,13 +86,9 @@ Crawling the full transitive tree from `react`, sampling one version per minor l
 ```
 4,593 packages     61,140 versions     33.4 GB streamed
 7,239 hosts        5,395 registrable domains
-281,745 distinct URLs across 7.6M occurrences
-max depth 32       1.1 GB corpus
+281,745 distinct URLs across 1.16M references
+max depth 32       223 MB corpus
 ```
-
-Of those 7.6M occurrences, 1,389 are install-time (`file_install_script`, `metadata_dep_spec`,
-`metadata_binary`) - 0.018%. That ratio is the whole reason `source_kind` is recorded per
-occurrence rather than filtered at extraction time.
 
 Two packages dominated the cost, in opposite ways. `aws-sdk` bumps its minor on nearly every
 release, so minor sampling kept 1,712 of its 1,936 versions and it ran for twelve hours while
@@ -97,25 +98,32 @@ there is currently no good lever for the second.
 
 ## How it works
 
-Every URL is stored with a `source_kind` recording where it came from, because that is what
-separates a finding from noise. In the `sqlite3` crawl above, 3584 URLs came from README files
-and 3 came from `binary.host`; only the latter is fetched during `npm install`.
+**Every URL is recorded with where it was found** — an archive-relative file path, or a dotted
+manifest field like `scripts.postinstall` or `binary.host`. That is provenance, not a severity
+rating, and the distinction is deliberate. An earlier version of this tool classified each URL
+into an `install-time` / `docs` / `source` taxonomy, and the classification was wrong often
+enough to be worse than useless.
 
-| Kind | Origin | Runs at install? |
-|---|---|---|
-| `metadata_script` | `preinstall` / `install` / `postinstall` / `prepare` | yes |
-| `file_install_script` | a file those hooks invoke, e.g. `scripts/install.js` | yes |
-| `metadata_binary` | `binary.host` (node-pre-gyp, prebuild-install) | yes |
-| `metadata_dep_spec` | an `http(s)` or `git+` dependency spec | yes |
-| `file_build_config` | `binding.gyp`, `Makefile`, shell scripts, CI config | sometimes |
-| `metadata_repo` | `repository`, `homepage`, `bugs`, `funding` | no |
-| `file_source` / `file_docs` / `file_test` | everything else in the tarball | no |
+The reason is that install-time reach is transitive and the classifier was not. A hook reads
+`"install": "node scripts/install.js"`, so `scripts/install.js` was marked install-time — but if
+that file does `require('./build.js')`, the URL actually being fetched sits in `build.js`, which
+was marked ordinary source. In the react corpus `aws-crt` cites the same CloudFront distribution
+in the same file 26 times; the old scheme called it install-time in 6 of them and inert source in
+the other 20, purely according to which filename that version's hook happened to name.
 
-Two things make the crawl cheap to extend:
+So `tarpit` does not guess. It records the breadcrumb, and exploitability is established by hand
+once a host is known to be claimable — which is the rarer property, and therefore the one worth
+filtering on first. Automating the transitive walk is worth doing only if that manual step ever
+becomes the bottleneck.
 
 **Tarballs never touch disk.** The response body is piped straight through gzip into tar and
 scanned in 1 MiB chunks with an overlap between them, so nothing is held whole in memory and
 nothing is skipped for being large.
+
+**One row per (URL, package, file), not per version.** A package's README cites the same URL in
+every version sampled, and storing that separately each time cost more than the rest of the
+corpus put together. The version span survives the collapse — `first_version_id`,
+`last_version_id` and `version_count` — because old versions are the entire premise.
 
 **Every dependency kind is recorded, even the ones being ignored.** `--dev` controls what gets
 *enqueued*, never what gets *stored*. So this:
@@ -130,7 +138,8 @@ edges the first one already wrote, and skips every version already on disk.
 
 ## Status
 
-Phase 1 (extraction) works. The `check` command does not exist yet.
+Phase 1 (extraction) works. The `check` command does not exist yet; it will consume the corpus
+through `export` rather than reimplementing takeover fingerprints here.
 
 ## Scope and conduct
 

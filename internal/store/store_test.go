@@ -30,8 +30,8 @@ func TestSaveVersionSanitizesInvalidUTF8(t *testing.T) {
 		Version: "1.0.0",
 		Findings: []Finding{{
 			URL: bad, Scheme: "https", Host: "example.com",
-			RegistrableDomain: "example.com", SourceKind: "file_source",
-			Location: "a\xff.js",
+			RegistrableDomain: "example.com",
+			Location:          "a\xff.js",
 		}},
 	}); err != nil {
 		t.Fatal(err)
@@ -39,8 +39,10 @@ func TestSaveVersionSanitizesInvalidUTF8(t *testing.T) {
 
 	var url, location string
 	if err := db.DB().QueryRow(`
-		SELECT u.url, o.location
-		FROM url_occurrences o JOIN urls u ON u.id = o.url_id`).
+		SELECT u.url, l.path
+		FROM url_occurrences o
+		JOIN urls u      ON u.id = o.url_id
+		JOIN locations l ON l.id = o.location_id`).
 		Scan(&url, &location); err != nil {
 		t.Fatal(err)
 	}
@@ -70,11 +72,11 @@ func TestHostsTableSkipsUnresolvableHosts(t *testing.T) {
 	}
 
 	findings := []Finding{
-		{URL: "https://www", Scheme: "https", Host: "www", SourceKind: "file_source", Location: "a.js"},
+		{URL: "https://www", Scheme: "https", Host: "www", Location: "a.js"},
 		{URL: "https://real.example.com", Scheme: "https", Host: "real.example.com",
-			RegistrableDomain: "example.com", SourceKind: "file_source", Location: "b.js"},
+			RegistrableDomain: "example.com", Location: "b.js"},
 		{URL: "s3://my-release-bucket", Scheme: "s3", Host: "my-release-bucket",
-			SourceKind: "metadata_binary", Location: "binary.host"},
+			Location: "binary.host"},
 	}
 	if err := db.SaveVersion(ctx, pkgID, VersionResult{Version: "1.0.0", Findings: findings}); err != nil {
 		t.Fatal(err)

@@ -20,6 +20,13 @@ import (
 type Store struct {
 	db *sql.DB
 	mu sync.Mutex
+
+	// loc interns file paths into locations.id. Every write goes through mu,
+	// so a plain map is enough; locPending tracks the ids minted by the
+	// in-flight transaction so a rollback does not leave the cache promising
+	// rows that were never committed.
+	loc        map[string]int64
+	locPending []string
 }
 
 // Open opens or creates a corpus at path and applies the schema.
@@ -43,50 +50,17 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, loc: map[string]int64{}}, nil
 }
 
 // migrate brings an existing corpus up to the current schema.
-//
-// Dropping snippet rewrites url_occurrences, which on a large corpus is slow -
-// but leaving it would break inserts, since the column is NOT NULL and is no
-// longer written.
 func migrate(db *sql.DB) error {
-	rows, err := db.Query(`PRAGMA table_info(url_occurrences)`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	hasSnippet := false
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-			return err
-		}
-		if name == "snippet" {
-			hasSnippet = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
 	// attempts used to be incremented on claim rather than on failure, so a
 	// corpus written by an older build carries counts inflated by restarts. A
 	// row that never recorded an error never actually failed, so its count is
 	// pure noise and would otherwise park the package early.
-	if _, err := db.Exec(
-		`UPDATE frontier SET attempts = 0 WHERE attempts > 0 AND last_error IS NULL`); err != nil {
-		return err
-	}
-
-	if !hasSnippet {
-		return nil
-	}
-	_, err = db.Exec(`ALTER TABLE url_occurrences DROP COLUMN snippet`)
+	_, err := db.Exec(
+		`UPDATE frontier SET attempts = 0 WHERE attempts > 0 AND last_error IS NULL`)
 	return err
 }
 
@@ -105,11 +79,48 @@ func (s *Store) write(ctx context.Context, fn func(*sql.Tx) error) error {
 	if err != nil {
 		return err
 	}
+	s.locPending = s.locPending[:0]
 	if err := fn(tx); err != nil {
 		tx.Rollback()
+		s.forgetPendingLocations()
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		s.forgetPendingLocations()
+		return err
+	}
+	return nil
+}
+
+// forgetPendingLocations drops cache entries whose rows did not survive.
+func (s *Store) forgetPendingLocations() {
+	for _, path := range s.locPending {
+		delete(s.loc, path)
+	}
+	s.locPending = s.locPending[:0]
+}
+
+// locationID interns a file path, returning the locations row id. The cache
+// carries the whole crawl: a full npm tree produced 55k distinct paths behind
+// millions of findings, so after the first few packages this never touches the
+// database.
+func (s *Store) locationID(ctx context.Context, tx *sql.Tx, path string) (int64, error) {
+	path = text(path)
+	if id, ok := s.loc[path]; ok {
+		return id, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO locations (path) VALUES (?)`, path); err != nil {
+		return 0, err
+	}
+	var id int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM locations WHERE path = ?`, path).Scan(&id); err != nil {
+		return 0, err
+	}
+	s.loc[path] = id
+	s.locPending = append(s.locPending, path)
+	return id, nil
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339) }
@@ -175,15 +186,11 @@ type Dep struct {
 // Finding is one URL sighting to record.
 type Finding struct {
 	URL               string
-	Scheme            string
+	Scheme            string // used to decide checkability; not stored
 	Host              string
-	Port              string
-	Path              string
 	RegistrableDomain string
 	HasPlaceholder    bool
-	SourceKind        string
 	Location          string
-	Line              int
 }
 
 // VersionResult is everything learned about one package version.
@@ -250,22 +257,60 @@ func (s *Store) SaveVersion(ctx context.Context, packageID int64, r VersionResul
 			}
 		}
 
+		// Findings from a failed version are deliberately dropped. A failed
+		// version is retried on a later run, and an occurrence row now counts
+		// the versions behind it - so replaying a half-finished scan would
+		// inflate version_count with no record of having already counted it.
+		// A version that failed outright yielded nothing anyway; one that
+		// failed partway loses a partial read of an artifact we will re-read.
+		if status != "done" {
+			return nil
+		}
+
+		// published sorts lexicographically because it is RFC3339. Versions
+		// with no publication date sort first, which is the honest answer:
+		// nothing is known about when they were live.
+		pubKey, _ := published.(string)
+
 		for _, f := range r.Findings {
 			urlID, err := upsertURL(ctx, tx, f)
 			if err != nil {
 				return err
 			}
-			res, err := tx.ExecContext(ctx,
-				`INSERT OR IGNORE INTO url_occurrences
-					(url_id, version_id, source_kind, location, line)
-				 VALUES (?, ?, ?, ?, ?)`,
-				urlID, versionID, f.SourceKind, text(f.Location), f.Line)
+			locID, err := s.locationID(ctx, tx, f.Location)
 			if err != nil {
 				return err
 			}
-			// Only count a host sighting when the occurrence was actually new,
-			// so re-running a version does not inflate the tally.
-			if n, _ := res.RowsAffected(); n > 0 && checkableHost(f.Host, f.Scheme) {
+
+			var count int
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO url_occurrences
+					(url_id, package_id, location_id,
+					 first_version_id, last_version_id, version_count)
+				VALUES (?, ?, ?, ?, ?, 1)
+				ON CONFLICT(url_id, package_id, location_id) DO UPDATE SET
+					version_count    = version_count + 1,
+					first_version_id = CASE WHEN ? < COALESCE((
+						SELECT published_at FROM package_versions
+						WHERE id = url_occurrences.first_version_id), '')
+						THEN excluded.first_version_id
+						ELSE url_occurrences.first_version_id END,
+					last_version_id  = CASE WHEN ? > COALESCE((
+						SELECT published_at FROM package_versions
+						WHERE id = url_occurrences.last_version_id), '')
+						THEN excluded.last_version_id
+						ELSE url_occurrences.last_version_id END
+				RETURNING version_count`,
+				urlID, packageID, locID, versionID, versionID,
+				pubKey, pubKey).Scan(&count); err != nil {
+				return err
+			}
+
+			// count == 1 means the row was inserted rather than updated, so
+			// this is the first time the host has been seen in this file of
+			// this package. Counting updates too would re-inflate the tally
+			// the dedup exists to deflate.
+			if count == 1 && checkableHost(f.Host, f.Scheme) {
 				if _, err := tx.ExecContext(ctx, `
 					INSERT INTO hosts (host, registrable_domain, first_seen_at, occurrence_count)
 					VALUES (?, ?, ?, 1)
@@ -307,9 +352,9 @@ func checkableHost(host, scheme string) bool {
 func upsertURL(ctx context.Context, tx *sql.Tx, f Finding) (int64, error) {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO urls
-			(url, scheme, host, port, path, registrable_domain, has_placeholder, first_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		text(f.URL), f.Scheme, text(f.Host), f.Port, text(f.Path),
+			(url, host, registrable_domain, has_placeholder, first_seen_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		text(f.URL), text(f.Host),
 		text(f.RegistrableDomain), f.HasPlaceholder, now()); err != nil {
 		return 0, err
 	}

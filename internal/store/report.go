@@ -14,13 +14,12 @@ type Stats struct {
 	Hosts            int
 	Domains          int
 	Occurrences      int
-	ByKind           map[string]int
 	FrontierByStatus map[string]int
 }
 
 // Stats reads corpus totals.
 func (s *Store) Stats(ctx context.Context) (*Stats, error) {
-	out := &Stats{ByKind: map[string]int{}, FrontierByStatus: map[string]int{}}
+	out := &Stats{FrontierByStatus: map[string]int{}}
 
 	scalars := []struct {
 		query string
@@ -40,11 +39,6 @@ func (s *Store) Stats(ctx context.Context) (*Stats, error) {
 		}
 	}
 
-	if err := scanCounts(ctx, s.db,
-		`SELECT source_kind, count(*) FROM url_occurrences GROUP BY source_kind`,
-		out.ByKind); err != nil {
-		return nil, err
-	}
 	if err := scanCounts(ctx, s.db,
 		`SELECT status, count(*) FROM frontier GROUP BY status`,
 		out.FrontierByStatus); err != nil {
@@ -70,8 +64,8 @@ func scanCounts(ctx context.Context, db *sql.DB, query string, into map[string]i
 	return rows.Err()
 }
 
-// ExportRow is one URL sighting joined back to the package version it came
-// from - the shape the phase-two checker and any external triage will consume.
+// ExportRow is one URL sighting joined back to where it was found - the shape
+// the takeover checker and any external triage will consume.
 type ExportRow struct {
 	URL               string `json:"url"`
 	Host              string `json:"host"`
@@ -79,37 +73,28 @@ type ExportRow struct {
 	HasPlaceholder    bool   `json:"has_placeholder,omitempty"`
 	Ecosystem         string `json:"ecosystem"`
 	Package           string `json:"package"`
-	Version           string `json:"version"`
-	PublishedAt       string `json:"published_at,omitempty"`
-	SourceKind        string `json:"source_kind"`
 	Location          string `json:"location"`
-	Line              int    `json:"line,omitempty"`
+	FirstVersion      string `json:"first_version"`
+	LastVersion       string `json:"last_version"`
+	VersionCount      int    `json:"version_count"`
 }
 
-// Export streams every occurrence in the corpus to fn, ordered so that the
-// highest-severity kinds come first: whoever reads the dump sees install-time
-// fetches before README badges.
+// Export streams every reference in the corpus to fn, grouped by host so that
+// everything pointing at one piece of infrastructure arrives together. That is
+// the order the work is actually done in: a host is claimable or it is not, and
+// the packages behind it are what gets read afterwards.
 func (s *Store) Export(ctx context.Context, fn func(ExportRow) error) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT u.url, u.host, u.registrable_domain, u.has_placeholder,
-		       p.ecosystem, p.name, v.version, COALESCE(v.published_at, ''),
-		       o.source_kind, o.location, o.line
+		       p.ecosystem, p.name, l.path,
+		       fv.version, lv.version, o.version_count
 		FROM url_occurrences o
 		JOIN urls u             ON u.id = o.url_id
-		JOIN package_versions v ON v.id = o.version_id
-		JOIN packages p         ON p.id = v.package_id
-		ORDER BY
-			CASE o.source_kind
-				WHEN 'metadata_script'     THEN 0
-				WHEN 'file_install_script' THEN 1
-				WHEN 'metadata_binary'     THEN 2
-				WHEN 'metadata_dep_spec'   THEN 3
-				WHEN 'file_build_config'   THEN 4
-				WHEN 'metadata_repo'       THEN 5
-				WHEN 'file_source'         THEN 6
-				ELSE 7
-			END,
-			u.host, p.name, v.version`)
+		JOIN packages p         ON p.id = o.package_id
+		JOIN locations l        ON l.id = o.location_id
+		JOIN package_versions fv ON fv.id = o.first_version_id
+		JOIN package_versions lv ON lv.id = o.last_version_id
+		ORDER BY u.host, p.name, l.path`)
 	if err != nil {
 		return err
 	}
@@ -118,8 +103,8 @@ func (s *Store) Export(ctx context.Context, fn func(ExportRow) error) error {
 	for rows.Next() {
 		var r ExportRow
 		if err := rows.Scan(&r.URL, &r.Host, &r.RegistrableDomain, &r.HasPlaceholder,
-			&r.Ecosystem, &r.Package, &r.Version, &r.PublishedAt,
-			&r.SourceKind, &r.Location, &r.Line); err != nil {
+			&r.Ecosystem, &r.Package, &r.Location,
+			&r.FirstVersion, &r.LastVersion, &r.VersionCount); err != nil {
 			return err
 		}
 		if err := fn(r); err != nil {

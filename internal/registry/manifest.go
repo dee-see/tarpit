@@ -3,8 +3,6 @@ package registry
 import (
 	"encoding/json"
 	"fmt"
-	"path"
-	"strings"
 
 	"github.com/dee-see/tarpit/internal/extract"
 )
@@ -30,7 +28,6 @@ type Dependency struct {
 
 // MetaFinding is a URL found in the registry manifest rather than in a file.
 type MetaFinding struct {
-	Kind     extract.SourceKind
 	Location string // dotted manifest path, e.g. "scripts.postinstall"
 	URL      extract.URL
 }
@@ -47,19 +44,6 @@ type Manifest struct {
 	URLs               []MetaFinding
 }
 
-// installLifecycle are the scripts npm runs when a package is installed as a
-// dependency. prepublish is included because in npm 4 and earlier it ran on
-// plain `npm install` too, and this corpus is mostly old versions.
-var installLifecycle = map[string]bool{
-	"preinstall": true, "install": true, "postinstall": true,
-	"prepare": true, "preprepare": true, "postprepare": true, "prepublish": true,
-}
-
-var scriptExts = map[string]bool{
-	".js": true, ".cjs": true, ".mjs": true, ".sh": true, ".bash": true,
-	".py": true, ".rb": true, ".ps1": true, ".bat": true, ".cmd": true,
-}
-
 // ParseManifest reads one version entry out of a packument.
 //
 // Fields are decoded one at a time from a raw map rather than into a single
@@ -74,8 +58,7 @@ func ParseManifest(raw json.RawMessage) (*Manifest, error) {
 	}
 
 	m := &Manifest{
-		Version:            decodeString(fields["version"]),
-		InstallScriptFiles: map[string]bool{},
+		Version: decodeString(fields["version"]),
 	}
 
 	if dist, ok := fields["dist"]; ok {
@@ -84,33 +67,27 @@ func ParseManifest(raw json.RawMessage) (*Manifest, error) {
 	}
 
 	seen := map[string]bool{}
-	add := func(kind extract.SourceKind, location, candidate string) {
+	add := func(location, candidate string) {
 		for _, match := range extract.Find([]byte(candidate)) {
 			u, ok := extract.Normalize(match.Raw)
 			if !ok || seen[u.Normalized] {
 				continue
 			}
 			seen[u.Normalized] = true
-			m.URLs = append(m.URLs, MetaFinding{Kind: kind, Location: location, URL: u})
+			m.URLs = append(m.URLs, MetaFinding{Location: location, URL: u})
 		}
 	}
 
-	// Lifecycle scripts. These are the crown jewels: a URL here is fetched with
-	// the installing user's privileges.
+	// Lifecycle scripts. A URL in an install hook is fetched with the
+	// installing user's privileges; "scripts.<name>" in Location says which
+	// hook it was.
 	for name, cmd := range decodeStringMap(fields["scripts"]) {
-		kind := extract.MetadataOther
-		if installLifecycle[name] {
-			kind = extract.MetadataScript
-			for _, ref := range scriptFileRefs(cmd) {
-				m.InstallScriptFiles[ref] = true
-			}
-		}
-		add(kind, "scripts."+name, cmd)
+		add("scripts."+name, cmd)
 	}
 
 	// node-pre-gyp / prebuild-install binary hosting, which is usually a bucket.
 	for key, val := range decodeStringMap(fields["binary"]) {
-		add(extract.MetadataBinary, "binary."+key, val)
+		add("binary."+key, val)
 	}
 
 	// Dependency specs. npm fetches http(s) and git specs directly at install
@@ -123,7 +100,7 @@ func ParseManifest(raw json.RawMessage) (*Manifest, error) {
 	} {
 		for name, spec := range decodeStringMap(fields[field]) {
 			m.Deps = append(m.Deps, Dependency{Name: name, Range: spec, Kind: kind})
-			add(extract.MetadataDepSpec, field+"."+name, spec)
+			add(field+"."+name, spec)
 		}
 	}
 
@@ -131,7 +108,7 @@ func ParseManifest(raw json.RawMessage) (*Manifest, error) {
 	// a strong hint that the rest of the package's infrastructure went with it.
 	for _, field := range []string{"repository", "homepage", "bugs", "funding", "author", "contributors"} {
 		for _, s := range collectStrings(fields[field]) {
-			add(extract.MetadataRepo, field, s)
+			add(field, s)
 		}
 	}
 
@@ -139,31 +116,9 @@ func ParseManifest(raw json.RawMessage) (*Manifest, error) {
 	// custom keys, publisher tooling residue, fields npm no longer documents.
 	// Everything already recorded is skipped by `seen`.
 	seen[m.TarballURL] = true
-	add(extract.MetadataOther, "manifest", string(raw))
+	add("manifest", string(raw))
 
 	return m, nil
-}
-
-// scriptFileRefs pulls script paths out of a shell command, so that
-// "postinstall": "node scripts/install.js" tells the tarball scanner which file
-// to treat as install-time code. This is the reason tarballs are downloaded at
-// all: the manifest proves a fetch happens, but hides where.
-func scriptFileRefs(cmd string) []string {
-	var out []string
-	fields := strings.FieldsFunc(cmd, func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '\n' || r == ';' || r == '|' || r == '&' || r == '"' || r == '\''
-	})
-	for _, tok := range fields {
-		tok = strings.TrimPrefix(tok, "./")
-		if tok == "" || strings.Contains(tok, "://") || strings.HasPrefix(tok, "-") {
-			continue
-		}
-		if !scriptExts[strings.ToLower(path.Ext(tok))] {
-			continue
-		}
-		out = append(out, path.Clean(tok))
-	}
-	return out
 }
 
 func decodeString(raw json.RawMessage) string {
