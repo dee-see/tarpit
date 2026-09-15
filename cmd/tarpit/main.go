@@ -66,7 +66,9 @@ func main() {
 func runCrawl(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("crawl", flag.ExitOnError)
 	dbPath := fs.String("db", "corpus.db", "corpus database path")
-	dev := fs.Bool("dev", false, "follow devDependencies (incremental: already-scanned versions are not refetched)")
+	dev := devMode(devSeeds)
+	fs.Var(&dev, "dev", "follow devDependencies: `seeds|all|none`, where seeds means the seed packages "+
+		"only. Incremental either way: already-scanned versions are not refetched")
 	noOptional := fs.Bool("no-optional", false, "do not follow optionalDependencies")
 	peer := fs.Bool("peer", false, "follow peerDependencies")
 	depth := fs.Int("depth", -1, "hops from the seed: 0 crawls the seeds alone, 1 adds their direct dependencies (-1 = unlimited)")
@@ -94,6 +96,9 @@ func runCrawl(ctx context.Context, args []string) error {
 	if !sample.Valid(sample.Strategy(*strategy)) {
 		return fmt.Errorf("invalid -sample %q: want minor, major or all", *strategy)
 	}
+	if !dev.valid() {
+		return fmt.Errorf("invalid -dev %q: want seeds, all or none", dev)
+	}
 
 	// Runtime edges are always followed: they are what actually lands on a
 	// consumer's machine, which is where a takeover has real blast radius.
@@ -101,11 +106,20 @@ func runCrawl(ctx context.Context, args []string) error {
 	if !*noOptional {
 		kinds = append(kinds, string(registry.DepOptional))
 	}
-	if *dev {
-		kinds = append(kinds, string(registry.DepDev))
-	}
 	if *peer {
 		kinds = append(kinds, string(registry.DepPeer))
+	}
+	// npm installs a package's devDependencies only when you are developing
+	// that package, so below the seeds a dev edge is not an install-time
+	// vector for anyone downstream. The default keeps the case that is one -
+	// the seeds' own dev deps, which do install on your machine and in your
+	// CI - without paying for a dev closure that outweighs the runtime one.
+	var seedKinds []string
+	switch dev {
+	case devSeeds:
+		seedKinds = append(seedKinds, string(registry.DepDev))
+	case devAll:
+		kinds = append(kinds, string(registry.DepDev))
 	}
 
 	db, err := store.Open(*dbPath)
@@ -115,7 +129,7 @@ func runCrawl(ctx context.Context, args []string) error {
 	defer db.Close()
 
 	flagsJSON, _ := json.Marshal(map[string]any{
-		"sample": *strategy, "depth": *depth, "kinds": kinds,
+		"sample": *strategy, "depth": *depth, "kinds": kinds, "seed_kinds": seedKinds,
 		"prerelease": *prerelease, "concurrency": *concurrency, "rate": *rps,
 	})
 	runID, err := db.StartRun(ctx, fmt.Sprint(seeds), string(flagsJSON))
@@ -129,13 +143,15 @@ func runCrawl(ctx context.Context, args []string) error {
 		Store:       db,
 		Sample:      sample.Options{Strategy: sample.Strategy(*strategy), IncludePrerelease: *prerelease},
 		FollowKinds: kinds,
+		SeedKinds:   seedKinds,
 		MaxDepth:    *depth,
 		Concurrency: *concurrency,
 		MaxAttempts: *attempts,
 		Logf:        log.Printf,
 	}
 
-	log.Printf("crawling %v (edges: %v, sample: %s, db: %s)", seeds, kinds, *strategy, *dbPath)
+	log.Printf("crawling %v (edges: %v, dev: %s, sample: %s, db: %s)",
+		seeds, kinds, dev, *strategy, *dbPath)
 	result, err := crawl.Run(ctx, cfg, seeds)
 
 	// Record totals even on interruption; the run is still part of the history.
@@ -214,6 +230,35 @@ func runExport(ctx context.Context, args []string) error {
 
 	enc := json.NewEncoder(w)
 	return db.Export(ctx, func(r store.ExportRow) error { return enc.Encode(r) })
+}
+
+// devMode is the value of -dev. It is a flag.Value rather than a bool because
+// the useful setting is neither of the two a bool offers: dev edges matter at
+// the seeds and cost far more than they are worth below them.
+type devMode string
+
+const (
+	devNone  devMode = "none"
+	devSeeds devMode = "seeds"
+	devAll   devMode = "all"
+)
+
+func (d *devMode) String() string { return string(*d) }
+
+// Set accepts anything; runCrawl validates, the way -sample does, so a bad
+// value gets one clear message instead of flag's ExitOnError path.
+//
+// Deliberately not a bool flag, even though -dev was one and IsBoolFlag would
+// let it stay bare. A bare -dev makes `-dev none` parse as -dev plus a
+// positional, and "none" and "all" are both real packages on npm - so the
+// space form would quietly crawl the wrong package instead of failing.
+func (d *devMode) Set(v string) error {
+	*d = devMode(v)
+	return nil
+}
+
+func (d devMode) valid() bool {
+	return d == devNone || d == devSeeds || d == devAll
 }
 
 // parseArgs parses flags that may appear before, after or between positional
